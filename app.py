@@ -1,276 +1,204 @@
 import os
-import secrets
+import time
 import uuid
-from datetime import datetime, timezone
-from functools import wraps
-
+from threading import Lock
 from flask import Flask, jsonify, request
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)
 
-SERVICE_NAME = os.getenv("SERVICE_NAME", "stumble-rewald-backend")
-ENVIRONMENT = os.getenv("ENVIRONMENT", "LIVE")
-API_TOKEN = os.getenv("API_TOKEN", "change-this-in-render")
+PORT = int(os.environ.get("PORT", "10000"))
+VERSION = "0.33"
+SERVER_NAME = "Trice-Stumbled"
+BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://stumble-rewald.onrender.com").rstrip("/")
 
+_lock = Lock()
 players = {}
 rooms = {}
 
-# Banner configuration served by the Render API.
-BANNER = {
-    "enabled": True,
-    "text": "Stumble Rewald v1.0 Mob",
-    "subtext": "by:zpedrox e pasin",
-    "titleColor": "#00E5FF",
-    "subtitleColor": "#39FF14",
-    "alignment": "center",
-    "position": "top",
-    "showInAllRounds": True,
-    "showInAllMaps": True,
-}
 
-
-def now():
-    return datetime.now(timezone.utc).isoformat()
-
-
-def response(data=None, status=200, **extra):
-    payload = {"success": status < 400, "timestamp": now()}
-    if data is not None:
-        payload["data"] = data
-    payload.update(extra)
-    return jsonify(payload), status
-
-
-def bearer_ok():
-    if API_TOKEN == "change-this-in-render":
-        return True  # Development mode; set API_TOKEN in Render for production.
-    supplied = request.headers.get("Authorization", "")
-    return secrets.compare_digest(supplied, f"Bearer {API_TOKEN}")
-
-
-def optional_auth(func):
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        if not bearer_ok():
-            return response(status=401, error="Unauthorized")
-        return func(*args, **kwargs)
-    return wrapper
-
-
-def body():
+def json_body():
     return request.get_json(silent=True) or {}
 
 
-def player_for(user_id):
-    user_id = str(user_id or "guest")
-    if user_id not in players:
-        players[user_id] = {
-            "userId": user_id,
-            "id": user_id,
-            "displayName": ".gg/sgrewald",
-            "username": ".gg/sgrewald",
-            "coins": 0,
-            "crowns": 0,
-            "trophies": 0,
-            "experience": 0,
-            "inventory": [],
-            "rewards": [],
-            "createdAt": now(),
-            "updatedAt": now(),
-        }
-    return players[user_id]
+def player_from_body(data):
+    player_id = str(data.get("player_id") or data.get("id") or "local-player")
+    name = str(data.get("display_name") or data.get("name") or ".gg/sgrewald")[:24]
+    return player_id, name
 
 
-@app.after_request
-def cors_headers(result):
-    result.headers["Access-Control-Allow-Origin"] = "*"
-    result.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
-    result.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-    return result
+def room_snapshot(room):
+    return {
+        "room_id": room["room_id"],
+        "state": room["state"],
+        "players": len(room["players"]),
+        "max_players": room["max_players"],
+        "version": VERSION,
+        "region": room["region"],
+        "created_at": room["created_at"],
+    }
 
 
-@app.route("/", methods=["GET", "HEAD"])
+@app.get("/")
 def index():
-    return response({"service": SERVICE_NAME, "environment": ENVIRONMENT, "status": "online"})
-
-
-@app.get("/status")
-def status():
-    return response({"node": SERVICE_NAME, "env": ENVIRONMENT, "host": request.host, "status": "online"})
+    return "Trice-Stumbled 0.33 ONLINE", 200
 
 
 @app.get("/health")
+@app.get("/api/health")
 def health():
-    return response({"status": "ok", "database": "memory", "photon": "not-included"})
+    return jsonify({"ok": True, "status": "online", "server": SERVER_NAME, "version": VERSION}), 200
 
 
-@app.post("/api/v1/login")
-@app.post("/api/login")
-@app.post("/login")
-def login():
-    data = body()
-    user_id = str(data.get("userId") or data.get("user_id") or data.get("deviceId") or uuid.uuid4().hex)
-    player = player_for(user_id)
-    if data.get("displayName") or data.get("username"):
-        player["displayName"] = str(data.get("displayName") or data.get("username"))[:24]
-        player["username"] = player["displayName"]
-    return response({"token": API_TOKEN, "accessToken": API_TOKEN, "user": player, "player": player}, loggedIn=True)
+@app.get("/api/status")
+@app.get("/api/v1/status")
+def status():
+    with _lock:
+        active_rooms = len(rooms)
+        online_players = len(players)
+    return jsonify({
+        "online": True,
+        "status": "online",
+        "server": SERVER_NAME,
+        "server_name": SERVER_NAME,
+        "game_version": VERSION,
+        "version": VERSION,
+        "region": "sa",
+        "maintenance": False,
+        "matchmaking_enabled": True,
+        "active_rooms": active_rooms,
+        "online_players": online_players,
+        "time": int(time.time()),
+    }), 200
 
 
-@app.get("/api/v1/player/<user_id>")
-@app.get("/api/player/<user_id>")
-@app.get("/user/<user_id>")
-@optional_auth
-def get_player(user_id):
-    return response(player_for(user_id))
-
-
-@app.put("/api/v1/player/<user_id>")
-@app.patch("/api/v1/player/<user_id>")
-@optional_auth
-def update_player(user_id):
-    p = player_for(user_id)
-    data = body()
-    for source, target in (("displayName", "displayName"), ("username", "username"), ("coins", "coins"), ("crowns", "crowns"), ("trophies", "trophies"), ("experience", "experience")):
-        if source in data:
-            p[target] = data[source]
-    p["updatedAt"] = now()
-    return response(p)
-
-
-@app.get("/api/v1/banner")
-@app.get("/api/banner")
-@app.get("/banner")
-def banner():
-    return response(BANNER)
-
-
-@app.get("/api/v1/config")
 @app.get("/api/config")
-@app.get("/config")
-@optional_auth
+@app.get("/api/v1/config")
 def config():
-    return response({
-        "environment": ENVIRONMENT,
-        "backendUrl": request.host_url.rstrip("/"),
-        "features": {"customRooms": True, "blockDashRevive": True, "blockDashLegendaryRevive": True},
-        "matchmaking": {"enabled": True, "provider": "local-test"},
-    })
+    return jsonify({
+        "server": SERVER_NAME,
+        "game_version": VERSION,
+        "region": "sa",
+        "matchmaking_enabled": True,
+        "photon_required": True,
+        "backend_url": BASE_URL,
+        "server_url": BASE_URL,
+        "message_connecting": "Conectando nos servidores do Trice-Stumbled",
+        "message_searching": "Procurando salas do Trice-Stumbled",
+        "message_waiting": "À espera de jogadores",
+    }), 200
 
 
-@app.route("/api/v1/profile", methods=["GET", "POST"])
-@app.route("/profile", methods=["GET", "POST"])
-@optional_auth
+@app.get("/api/profile")
+@app.get("/api/v1/profile")
 def profile():
-    data = body()
-    return response(player_for(data.get("userId") or request.args.get("userId") or "guest"))
+    player_id = request.args.get("player_id", "local-player")
+    with _lock:
+        p = players.get(player_id, {
+            "player_id": player_id,
+            "display_name": ".gg/sgrewald",
+            "coins": 5000,
+            "gems": 19650,
+            "skin": "default",
+        })
+    return jsonify(p), 200
 
 
-@app.route("/api/v1/inventory", methods=["GET", "POST", "PUT"])
-@app.route("/inventory", methods=["GET", "POST", "PUT"])
-@optional_auth
-def inventory():
-    data = body()
-    p = player_for(data.get("userId") or request.args.get("userId") or "guest")
-    if request.method != "GET" and data.get("itemId"):
-        p["inventory"].append({"itemId": str(data["itemId"]), "equipped": bool(data.get("equipped", False))})
-    return response({"items": p["inventory"], "balances": {"coins": p["coins"], "crowns": p["crowns"]}})
+@app.post("/api/login")
+@app.post("/api/v1/login")
+def login():
+    data = json_body()
+    player_id, name = player_from_body(data)
+    with _lock:
+        players.setdefault(player_id, {
+            "player_id": player_id,
+            "display_name": name,
+            "coins": 5000,
+            "gems": 19650,
+            "skin": "default",
+        })
+        players[player_id]["online"] = True
+    return jsonify({
+        "success": True,
+        "ok": True,
+        "token": f"local-{player_id}",
+        "player_id": player_id,
+        "display_name": name,
+        "version": VERSION,
+    }), 200
 
 
-@app.route("/api/v1/ranks", methods=["GET", "POST"])
-@app.route("/api/v1/ranking", methods=["GET", "POST"])
-@app.route("/ranking", methods=["GET", "POST"])
-@optional_auth
-def ranks():
-    rows = sorted(players.values(), key=lambda p: int(p.get("trophies", 0)), reverse=True)
-    start = int(request.args.get("start", 0))
-    count = int(request.args.get("count", 100))
-    return response({"entries": rows[start:start + count], "total": len(rows)})
+@app.post("/api/profile/update")
+def profile_update():
+    data = json_body()
+    player_id, name = player_from_body(data)
+    with _lock:
+        p = players.setdefault(player_id, {"player_id": player_id})
+        p["display_name"] = name
+        if "skin" in data:
+            p["skin"] = str(data["skin"])[:80]
+    return jsonify({"success": True, "profile": p}), 200
 
 
-@app.route("/api/v1/news", methods=["GET", "POST"])
-@app.route("/news", methods=["GET", "POST"])
-@optional_auth
-def news():
-    return response({"items": [], "latestNewsId": 0})
+@app.post("/api/matchmaking/start")
+@app.post("/api/v1/matchmaking/start")
+def matchmaking_start():
+    data = json_body()
+    player_id, name = player_from_body(data)
+    with _lock:
+        players.setdefault(player_id, {"player_id": player_id, "display_name": name})
+        room = next((r for r in rooms.values() if r["state"] == "waiting" and len(r["players"]) < r["max_players"]), None)
+        if room is None:
+            room_id = f"rewald-{uuid.uuid4().hex[:8]}"
+            room = {"room_id": room_id, "state": "waiting", "players": {}, "max_players": 32, "region": "sa", "created_at": int(time.time())}
+            rooms[room_id] = room
+        room["players"][player_id] = {"player_id": player_id, "display_name": name}
+    return jsonify({"success": True, "ok": True, "state": "searching", "message": "Procurando salas do Trice-Stumbled", **room_snapshot(room)}), 200
 
 
-@app.route("/api/v1/economy", methods=["GET", "POST"])
-@app.route("/economy", methods=["GET", "POST"])
-@app.route("/api/v1/refresh-economy", methods=["GET", "POST"])
-@optional_auth
-def economy():
-    p = player_for(body().get("userId") or request.args.get("userId") or "guest")
-    return response({"balances": {"coins": p["coins"], "crowns": p["crowns"]}, "rewards": p["rewards"]})
+@app.get("/api/matchmaking/status")
+@app.get("/api/v1/matchmaking/status")
+def matchmaking_status():
+    room_id = request.args.get("room_id")
+    with _lock:
+        room = rooms.get(room_id) if room_id else next(iter(rooms.values()), None)
+        if room is None:
+            return jsonify({"success": True, "state": "idle", "message": "Nenhuma sala encontrada", "players": 0}), 200
+        return jsonify({"success": True, "message": "À espera de jogadores", **room_snapshot(room)}), 200
 
 
-@app.route("/api/v1/purchase", methods=["POST"])
-@app.route("/purchase", methods=["POST"])
-@app.route("/api/v1/purchase-drop", methods=["POST"])
-@app.route("/api/v1/purchase-gacha", methods=["POST"])
-@optional_auth
-def purchase():
-    return response({"purchaseId": uuid.uuid4().hex, "completed": True, "item": body().get("itemId")})
+@app.post("/api/matchmaking/stop")
+@app.post("/api/v1/matchmaking/stop")
+def matchmaking_stop():
+    data = json_body()
+    room_id = data.get("room_id")
+    with _lock:
+        if room_id in rooms:
+            rooms[room_id]["state"] = "closed"
+    return jsonify({"success": True, "state": "stopped", "room_id": room_id}), 200
 
 
-@app.route("/api/v1/pass", methods=["GET", "POST"])
-@app.route("/api/v1/pass/reward", methods=["GET", "POST"])
-@app.route("/api/v1/pass/tier", methods=["GET", "POST"])
-@optional_auth
-def battle_pass():
-    return response({"active": True, "tier": 0, "rewards": [], "claimed": []})
-
-
-@app.route("/api/v1/search-users", methods=["GET", "POST"])
-@app.route("/api/v1/users/search", methods=["GET", "POST"])
-@optional_auth
-def search_users():
-    query = str(body().get("query") or request.args.get("query") or "").lower()
-    found = [p for p in players.values() if query in p["displayName"].lower()]
-    return response({"users": found[:50]})
-
-
-@app.route("/api/v1/finish-round", methods=["POST"])
-@app.route("/api/v1/finish-tournament-round", methods=["POST"])
-@app.route("/api/v1/check-players", methods=["GET", "POST"])
-@app.route("/api/v1/round/finish", methods=["POST"])
-@optional_auth
-def finish_round():
-    return response({"accepted": True, "finished": True, "rewards": []})
-
-
-@app.route("/api/v1/rooms", methods=["GET", "POST"])
-@app.route("/api/v1/matchmaking", methods=["GET", "POST"])
-@app.route("/matchmaking", methods=["GET", "POST"])
-@optional_auth
-def matchmaking():
-    data = body()
-    room_id = str(data.get("roomId") or data.get("roomCode") or uuid.uuid4().hex[:8].upper())
-    rooms.setdefault(room_id, {"roomId": room_id, "status": "waiting", "players": [], "map": data.get("map", "BlockDash")})
-    return response(rooms[room_id])
-
-
-# Compatibility fallback: every other HTTP API path receives valid JSON instead of HTML.
-# It cannot implement Photon binary matchmaking; a real Photon server is still required for that.
-@app.route("/<path:unknown>", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
-def api_fallback(unknown):
-    if request.method == "OPTIONS":
-        return ("", 204)
-    return response({"route": "/" + unknown, "implemented": False, "service": SERVICE_NAME}, status=200)
+@app.get("/api/rooms")
+def list_rooms():
+    with _lock:
+        result = [room_snapshot(r) for r in rooms.values() if r["state"] == "waiting"]
+    return jsonify({"success": True, "rooms": result}), 200
 
 
 @app.errorhandler(404)
-def not_found(_error):
-    return response(status=404, error="Route not found")
+def not_found(_):
+    return jsonify({"success": False, "error": "route_not_found", "path": request.path}), 404
 
 
 @app.errorhandler(500)
-def server_error(_error):
-    return response(status=500, error="Internal server error")
+def server_error(_):
+    return jsonify({"success": False, "error": "internal_server_error"}), 500
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+    app.run(host="0.0.0.0", port=PORT)
+
 
 
     
