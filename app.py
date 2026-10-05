@@ -7,11 +7,11 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
-# Configuração compatível com o APK Trice-Stumbled 0.33
+# Configuração compatível com o APK StumbleGuys 0.33 analisado
 GAME_VERSION = "0.33"
-PHOTON_APP_VERSION = "0.3"
+PHOTON_APP_VERSION = "Playtest Group Alpha"
 PHOTON_REGION = "eu"
-PHOTON_APP_ID = "c2a63dcb-482a-4e95-a319-6f025581567d"
+PHOTON_APP_ID = "e7c4e3ac-6a25-4ce3-8240-0c25501b4c76"
 BASE_URL = "https://trice-stumbled-backend.onrender.com/api"
 SERVER_NAME = "Trice-Stumbled"
 DISPLAY_NAME = "TriceStumbled<color=orange><sup>#151"
@@ -39,7 +39,10 @@ def config_payload():
 
 @app.get("/")
 def root():
-    return "Trice-Stumbled 0.33 ONLINE", 200
+    # Compatibilidade: alguns clientes consultam a raiz em vez de /api/config.
+    payload = config_payload()
+    payload["root_compatibility"] = True
+    return jsonify(payload), 200
 
 
 @app.get("/api")
@@ -136,6 +139,7 @@ def bad_request(_error):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
