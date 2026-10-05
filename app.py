@@ -119,6 +119,84 @@ def guest_login():
     }), 200
 
 
+def _backbone_identity():
+    """Cria uma identidade de teste estável para o fluxo local do APK."""
+    data = request.get_json(silent=True) or {}
+    device_id = (
+        data.get("deviceId")
+        or data.get("device_id")
+        or request.headers.get("X-Device-Id")
+        or "local-device"
+    )
+    user_id = f"guest-{str(device_id)[:48]}"
+    access_token = f"trice-access-{uuid.uuid5(uuid.NAMESPACE_URL, str(device_id)).hex}"
+    refresh_token = f"trice-refresh-{uuid.uuid5(uuid.NAMESPACE_DNS, str(device_id)).hex}"
+    return data, device_id, user_id, access_token, refresh_token
+
+
+@app.post("/api/v1/userLogin")
+def backbone_user_login():
+    """Compatibilidade inicial com o login Backbone usado pelo APK 0.33."""
+    _data, device_id, user_id, access_token, refresh_token = _backbone_identity()
+    return jsonify({
+        "success": True,
+        "authenticated": True,
+        "userId": user_id,
+        "user_id": user_id,
+        "deviceId": device_id,
+        "accessToken": access_token,
+        "access_token": access_token,
+        "refreshToken": refresh_token,
+        "refresh_token": refresh_token,
+        "token": access_token,
+        "displayName": DISPLAY_NAME,
+        "display_name": DISPLAY_NAME,
+        "gameVersion": GAME_VERSION,
+        "game_version": GAME_VERSION,
+    }), 200
+
+
+@app.post("/api/v1/userConnect")
+def backbone_user_connect():
+    """Aceita a conexão após o login e devolve os mesmos tokens."""
+    _data, device_id, user_id, access_token, refresh_token = _backbone_identity()
+    return jsonify({
+        "success": True,
+        "authenticated": True,
+        "connected": True,
+        "userId": user_id,
+        "user_id": user_id,
+        "deviceId": device_id,
+        "accessToken": access_token,
+        "access_token": access_token,
+        "refreshToken": refresh_token,
+        "refresh_token": refresh_token,
+        "token": access_token,
+    }), 200
+
+
+@app.post("/api/v1/refreshAccessToken")
+def backbone_refresh_token():
+    """Compatibilidade com a renovação de sessão do cliente Backbone."""
+    _data, device_id, user_id, access_token, refresh_token = _backbone_identity()
+    return jsonify({
+        "success": True,
+        "authenticated": True,
+        "userId": user_id,
+        "deviceId": device_id,
+        "accessToken": access_token,
+        "access_token": access_token,
+        "refreshToken": refresh_token,
+        "refresh_token": refresh_token,
+        "token": access_token,
+    }), 200
+
+
+@app.route("/api/v1/ping", methods=["GET", "POST"])
+def backbone_ping():
+    return jsonify({"success": True, "ok": True, "status": "online"}), 200
+
+
 @app.errorhandler(404)
 def not_found(_error):
     return jsonify({
@@ -139,6 +217,7 @@ def bad_request(_error):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
