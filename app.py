@@ -45,6 +45,24 @@ def root():
     return jsonify(payload), 200
 
 
+@app.post("/")
+def root_post_compatibility():
+    """Fallback temporário para clientes que enviam /?v=:5010/user/login."""
+    hint = request.args.get("v", "")
+    if "/user/login" in hint:
+        return backbone_user_login()
+    if "/user/connect" in hint:
+        return backbone_user_connect()
+    if "/user/refreshAccessToken" in hint:
+        return backbone_refresh_token()
+    return jsonify({
+        "success": False,
+        "error": "unsupported_root_post",
+        "path": request.path,
+        "hint": hint,
+    }), 404
+
+
 @app.get("/api")
 @app.get("/api/")
 def api_root():
@@ -135,6 +153,7 @@ def _backbone_identity():
 
 
 @app.post("/api/v1/userLogin")
+@app.post("/user/login")
 def backbone_user_login():
     """Compatibilidade inicial com o login Backbone usado pelo APK 0.33."""
     _data, device_id, user_id, access_token, refresh_token = _backbone_identity()
@@ -157,6 +176,7 @@ def backbone_user_login():
 
 
 @app.post("/api/v1/userConnect")
+@app.post("/user/connect")
 def backbone_user_connect():
     """Aceita a conexão após o login e devolve os mesmos tokens."""
     _data, device_id, user_id, access_token, refresh_token = _backbone_identity()
@@ -176,6 +196,7 @@ def backbone_user_connect():
 
 
 @app.post("/api/v1/refreshAccessToken")
+@app.post("/user/refreshAccessToken")
 def backbone_refresh_token():
     """Compatibilidade com a renovação de sessão do cliente Backbone."""
     _data, device_id, user_id, access_token, refresh_token = _backbone_identity()
@@ -193,6 +214,7 @@ def backbone_refresh_token():
 
 
 @app.route("/api/v1/ping", methods=["GET", "POST"])
+@app.route("/user/ping", methods=["GET", "POST"])
 def backbone_ping():
     return jsonify({"success": True, "ok": True, "status": "online"}), 200
 
@@ -217,6 +239,7 @@ def bad_request(_error):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
