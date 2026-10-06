@@ -11,7 +11,7 @@ CORS(app, resources={r"/api/*": {"origins": "*"}})
 GAME_VERSION = "0.33"
 PHOTON_APP_VERSION = "0.3"
 PHOTON_REGION = "eu"
-PHOTON_APP_ID = "e7c4e3ac-6a25-4ce3-8240-0c25501b4c76"
+PHOTON_APP_ID = "06ff7df2-1af3-4f4c-91b8-f1a6c5ed61b1"
 BASE_URL = "https://trice-stumbled-backend.onrender.com/api"
 SERVER_NAME = "Trice-Stumbled"
 DISPLAY_NAME = "TriceStumbled<color=orange><sup>#151"
@@ -239,6 +239,7 @@ def bad_request(_error):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
