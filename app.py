@@ -9,7 +9,7 @@ CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 # Configuração compatível com o APK StumbleGuys 0.33 analisado
 GAME_VERSION = "0.33"
-PHOTON_APP_VERSION = "Playtest Group Alpha"
+PHOTON_APP_VERSION = "0.3"
 PHOTON_REGION = "eu"
 PHOTON_APP_ID = "e7c4e3ac-6a25-4ce3-8240-0c25501b4c76"
 BASE_URL = "https://trice-stumbled-backend.onrender.com/api"
@@ -239,6 +239,7 @@ def bad_request(_error):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
