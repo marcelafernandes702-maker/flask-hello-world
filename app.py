@@ -1,28 +1,37 @@
+import logging
 import os
 import random
 import secrets
 import sqlite3
 import time
 
-from flask import Flask, jsonify, request, g
+from flask import Flask, g, jsonify, request
+from werkzeug.exceptions import HTTPException
 
+# ============ CONFIG ============
 APP_NAME = "Stumble Lend"
 APP_VERSION = "0.50"
 NAME_PREFIX = ".gg/sglend"
+TOURNAMENT_ID = 1
 TOURNAMENT_NAME = "Lend BD 1v1"
+QUEUE_TIMEOUT = 60  # segundos na fila antes de expirar
 DB_PATH = os.environ.get("DB_PATH", "stumble_lend.db")
 
-SUPERSCRIPT = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+SUP = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+UNSUP = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("stumble-lend")
 
 app = Flask(__name__)
-app.config["JSON_AS_ASCII"] = False
 app.json.ensure_ascii = False
+app.json.sort_keys = False
 
 
-# ---------- Banco de dados ----------
+# ============ BANCO ============
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
+        g.db = sqlite3.connect(DB_PATH, timeout=10)
         g.db.row_factory = sqlite3.Row
     return g.db
 
@@ -36,23 +45,30 @@ def close_db(_exc):
 
 def init_db():
     db = sqlite3.connect(DB_PATH)
+    db.execute("PRAGMA journal_mode=WAL")
     db.executescript(
         """
         CREATE TABLE IF NOT EXISTS players (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             device_id TEXT UNIQUE NOT NULL,
-            name TEXT NOT NULL,
-            token TEXT NOT NULL,
-            transferred INTEGER DEFAULT 0,
-            created_at REAL
+            name TEXT UNIQUE NOT NULL,
+            token TEXT UNIQUE NOT NULL,
+            transferred INTEGER NOT NULL DEFAULT 0,
+            wins INTEGER NOT NULL DEFAULT 0,
+            losses INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL,
+            last_login REAL
         );
         CREATE TABLE IF NOT EXISTS queue (
             player_id INTEGER PRIMARY KEY,
-            joined_at REAL
+            joined_at REAL NOT NULL
         );
         CREATE TABLE IF NOT EXISTS matches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            p1 INTEGER, p2 INTEGER, created_at REAL
+            p1 INTEGER NOT NULL,
+            p2 INTEGER NOT NULL,
+            winner INTEGER,
+            created_at REAL NOT NULL
         );
         """
     )
@@ -60,34 +76,86 @@ def init_db():
     db.close()
 
 
-# ---------- Helpers ----------
-def make_player_name():
-    """.gg/sglend + números em sobrescrito (<sup>)"""
-    digits = str(random.randint(100, 99999))
-    return f"{NAME_PREFIX}{digits.translate(SUPERSCRIPT)}"
+# ============ HELPERS ============
+def new_name(db):
+    """.gg/sglend + números em sobrescrito, sem repetir."""
+    for _ in range(50):
+        name = NAME_PREFIX + str(random.randint(100, 99999)).translate(SUP)
+        if not db.execute("SELECT 1 FROM players WHERE name=?", (name,)).fetchone():
+            return name
+    return NAME_PREFIX + str(int(time.time())).translate(SUP)
 
 
 def name_html(name):
-    """Versão HTML usando <sup>, caso o cliente suporte rich text."""
-    base = name[: len(NAME_PREFIX)]
-    sup = name[len(NAME_PREFIX):].translate(str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789"))
-    return f"{base}<sup>{sup}</sup>"
+    return f"{NAME_PREFIX}<sup>{name[len(NAME_PREFIX):].translate(UNSUP)}</sup>"
 
 
-def auth_player():
+def body():
+    return request.get_json(silent=True) or {}
+
+
+def pick(data, *keys):
+    for k in keys:
+        v = data.get(k)
+        if v not in (None, ""):
+            return str(v).strip()
+    return ""
+
+
+def current_player():
     token = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
-    if not token:
-        token = (request.get_json(silent=True) or {}).get("token", "")
+    token = token or request.headers.get("X-Token", "").strip() or pick(body(), "token")
     if not token:
         return None
     return get_db().execute("SELECT * FROM players WHERE token=?", (token,)).fetchone()
 
 
-def unauthorized():
-    return jsonify(ok=False, error="unauthorized"), 401
+def err(msg, code=400, **extra):
+    return jsonify(ok=False, error=msg, **extra), code
 
 
-# ---------- Rotas ----------
+def player_json(p):
+    return {
+        "id": p["id"],
+        "name": p["name"],
+        "name_html": name_html(p["name"]),
+        "wins": p["wins"],
+        "losses": p["losses"],
+    }
+
+
+def popup_json(transferred):
+    return {
+        "show": not transferred,
+        "type": "transfer_items",
+        "title": "Transferir elementos",
+        "message": "Transfira seus elementos para entrar no lobby.",
+        "confirm_endpoint": "/api/transfer/confirm",
+    }
+
+
+def clean_queue(db):
+    db.execute("DELETE FROM queue WHERE joined_at < ?", (time.time() - QUEUE_TIMEOUT,))
+
+
+@app.after_request
+def no_cache(resp):
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.errorhandler(HTTPException)
+def http_error(e):
+    return err(e.name.lower().replace(" ", "_"), e.code)
+
+
+@app.errorhandler(Exception)
+def server_error(e):
+    log.exception("erro interno")
+    return err("internal_error", 500)
+
+
+# ============ ROTAS INFO ============
 @app.get("/")
 def index():
     return jsonify(name=APP_NAME, version=APP_VERSION, status="online")
@@ -103,8 +171,10 @@ def config():
     return jsonify(
         name=APP_NAME,
         version=APP_VERSION,
-        tournament=TOURNAMENT_NAME,
+        tournament={"id": TOURNAMENT_ID, "name": TOURNAMENT_NAME, "mode": "1v1"},
+        player_name_prefix=NAME_PREFIX,
         login_on_loading_screen=True,
+        transfer_required=True,
     )
 
 
@@ -116,6 +186,7 @@ def version():
 @app.get("/api/status")
 def status():
     db = get_db()
+    clean_queue(db)
     players = db.execute("SELECT COUNT(*) c FROM players").fetchone()["c"]
     waiting = db.execute("SELECT COUNT(*) c FROM queue").fetchone()["c"]
     return jsonify(
@@ -130,141 +201,89 @@ def status():
     )
 
 
-@app.post("/api/login")
+# ============ LOGIN / LOBBY ============
 @app.post("/api/user/login")
+@app.post("/api/login")
 def login():
-    """Chamado na tela de carregamento. Cria a conta no primeiro acesso."""
-    data = request.get_json(silent=True) or {}
-    device_id = (data.get("device_id") or "").strip()
-    client_version = str(data.get("version", APP_VERSION))
+    data = body()
+    device_id = pick(data, "device_id", "deviceId", "uid", "id")
+    client_version = pick(data, "version", "app_version") or request.headers.get("X-Version", APP_VERSION)
 
     if not device_id:
-        return jsonify(ok=False, error="device_id obrigatório"), 400
+        return err("device_id obrigatório", 400)
     if client_version != APP_VERSION:
-        return jsonify(ok=False, error=f"Versão inválida. Use a {APP_VERSION}"), 426
+        return err(f"Versão inválida. Use a {APP_VERSION}", 426)
 
     db = get_db()
-    player = db.execute("SELECT * FROM players WHERE device_id=?", (device_id,)).fetchone()
-    first_login = player is None
+    now = time.time()
+    p = db.execute("SELECT * FROM players WHERE device_id=?", (device_id,)).fetchone()
+    first_login = p is None
 
     if first_login:
         db.execute(
-            "INSERT INTO players (device_id, name, token, created_at) VALUES (?,?,?,?)",
-            (device_id, make_player_name(), secrets.token_hex(24), time.time()),
+            "INSERT INTO players (device_id, name, token, created_at, last_login) VALUES (?,?,?,?,?)",
+            (device_id, new_name(db), secrets.token_hex(24), now, now),
         )
-        db.commit()
-        player = db.execute("SELECT * FROM players WHERE device_id=?", (device_id,)).fetchone()
-
-    # Pop-up de transferir elementos: aparece até o jogador confirmar
-    show_transfer_popup = not bool(player["transferred"])
+        log.info("novo jogador device=%s", device_id[:8])
+    else:
+        db.execute("UPDATE players SET last_login=? WHERE id=?", (now, p["id"]))
+    db.commit()
+    p = db.execute("SELECT * FROM players WHERE device_id=?", (device_id,)).fetchone()
 
     return jsonify(
         ok=True,
         first_login=first_login,
-        token=player["token"],
-        player={
-            "id": player["id"],
-            "name": player["name"],
-            "name_html": name_html(player["name"]),
-        },
-        popup={
-            "show": show_transfer_popup,
-            "type": "transfer_items",
-            "title": "Transferir elementos",
-            "message": "Transfira seus elementos para entrar no lobby.",
-            "confirm_endpoint": "/api/transfer/confirm",
-        },
-        can_enter_lobby=not show_transfer_popup,
+        token=p["token"],
+        player=player_json(p),
+        popup=popup_json(bool(p["transferred"])),
+        can_enter_lobby=bool(p["transferred"]),
     )
+
+
+@app.get("/api/user/me")
+def me():
+    p = current_player()
+    if not p:
+        return err("unauthorized", 401)
+    return jsonify(ok=True, player=player_json(p), can_enter_lobby=bool(p["transferred"]))
 
 
 @app.post("/api/transfer/confirm")
 def transfer_confirm():
-    player = auth_player()
-    if not player:
-        return unauthorized()
+    p = current_player()
+    if not p:
+        return err("unauthorized", 401)
     db = get_db()
-    db.execute("UPDATE players SET transferred=1 WHERE id=?", (player["id"],))
+    db.execute("UPDATE players SET transferred=1 WHERE id=?", (p["id"],))
     db.commit()
     return jsonify(ok=True, can_enter_lobby=True)
 
 
 @app.post("/api/lobby/enter")
 def lobby_enter():
-    player = auth_player()
-    if not player:
-        return unauthorized()
-    if not player["transferred"]:
-        return jsonify(ok=False, error="transfer_required", popup="transfer_items"), 403
+    p = current_player()
+    if not p:
+        return err("unauthorized", 401)
+    if not p["transferred"]:
+        return err("transfer_required", 403, popup=popup_json(False))
     return jsonify(
         ok=True,
         lobby={"name": APP_NAME, "version": APP_VERSION, "tournament": TOURNAMENT_NAME},
+        player=player_json(p),
     )
 
 
+# ============ TORNEIO ============
 @app.get("/api/tournaments")
 def tournaments():
-    count = get_db().execute("SELECT COUNT(*) c FROM queue").fetchone()["c"]
+    db = get_db()
+    clean_queue(db)
+    waiting = db.execute("SELECT COUNT(*) c FROM queue").fetchone()["c"]
     return jsonify(
         tournaments=[
-            {"id": 1, "name": TOURNAMENT_NAME, "mode": "1v1", "players_waiting": count}
+            {"id": TOURNAMENT_ID, "name": TOURNAMENT_NAME, "mode": "1v1", "players_waiting": waiting}
         ]
     )
-
-
-@app.post("/api/tournaments/1/join")
-def tournament_join():
-    player = auth_player()
-    if not player:
-        return unauthorized()
-    if not player["transferred"]:
-        return jsonify(ok=False, error="transfer_required"), 403
-
-    db = get_db()
-    db.execute(
-        "INSERT OR REPLACE INTO queue (player_id, joined_at) VALUES (?,?)",
-        (player["id"], time.time()),
-    )
-    opponent = db.execute(
-        "SELECT q.player_id, p.name FROM queue q JOIN players p ON p.id=q.player_id "
-        "WHERE q.player_id != ? ORDER BY q.joined_at LIMIT 1",
-        (player["id"],),
-    ).fetchone()
-
-    if opponent:
-        db.execute("DELETE FROM queue WHERE player_id IN (?,?)", (player["id"], opponent["player_id"]))
-        cur = db.execute(
-            "INSERT INTO matches (p1, p2, created_at) VALUES (?,?,?)",
-            (player["id"], opponent["player_id"], time.time()),
-        )
-        db.commit()
-        return jsonify(
-            ok=True,
-            status="matched",
-            match_id=cur.lastrowid,
-            tournament=TOURNAMENT_NAME,
-            opponent=opponent["name"],
-        )
-
-    db.commit()
-    return jsonify(ok=True, status="waiting", tournament=TOURNAMENT_NAME)
-
-
-@app.post("/api/tournaments/1/leave")
-def tournament_leave():
-    player = auth_player()
-    if not player:
-        return unauthorized()
-    db = get_db()
-    db.execute("DELETE FROM queue WHERE player_id=?", (player["id"],))
-    db.commit()
-    return jsonify(ok=True)
-
-
-init_db()
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
 
 
 
