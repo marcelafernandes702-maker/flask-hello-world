@@ -45,18 +45,17 @@ def close_db(_exc):
 
 def init_db():
     db = sqlite3.connect(DB_PATH)
-    db.execute("PRAGMA journal_mode=WAL")
     db.executescript(
         """
         CREATE TABLE IF NOT EXISTS players (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             device_id TEXT UNIQUE NOT NULL,
-            name TEXT UNIQUE NOT NULL,
-            token TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            token TEXT NOT NULL,
             transferred INTEGER NOT NULL DEFAULT 0,
             wins INTEGER NOT NULL DEFAULT 0,
             losses INTEGER NOT NULL DEFAULT 0,
-            created_at REAL NOT NULL,
+            created_at REAL NOT NULL DEFAULT 0,
             last_login REAL
         );
         CREATE TABLE IF NOT EXISTS queue (
@@ -68,10 +67,26 @@ def init_db():
             p1 INTEGER NOT NULL,
             p2 INTEGER NOT NULL,
             winner INTEGER,
-            created_at REAL NOT NULL
+            created_at REAL NOT NULL DEFAULT 0
         );
         """
     )
+    # Migração: bancos criados pela versão anterior não têm estas colunas
+    wanted = {
+        "players": {
+            "wins": "INTEGER NOT NULL DEFAULT 0",
+            "losses": "INTEGER NOT NULL DEFAULT 0",
+            "last_login": "REAL",
+            "transferred": "INTEGER NOT NULL DEFAULT 0",
+        },
+        "matches": {"winner": "INTEGER"},
+    }
+    for table, cols in wanted.items():
+        have = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+        for col, ddl in cols.items():
+            if col not in have:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+                log.info("migração: %s.%s adicionada", table, col)
     db.commit()
     db.close()
 
@@ -151,7 +166,9 @@ def http_error(e):
 
 @app.errorhandler(Exception)
 def server_error(e):
-    log.exception("erro interno")
+    log.exception("erro interno em %s %s", request.method, request.path)
+    if os.environ.get("DEBUG_ERRORS") == "1":
+        return err("internal_error", 500, detail=f"{type(e).__name__}: {e}")
     return err("internal_error", 500)
 
 
@@ -171,10 +188,11 @@ def config():
     return jsonify(
         name=APP_NAME,
         version=APP_VERSION,
+        lobby_name="MainLobby",
         tournament={"id": TOURNAMENT_ID, "name": TOURNAMENT_NAME, "mode": "1v1"},
         player_name_prefix=NAME_PREFIX,
         login_on_loading_screen=True,
-        transfer_required=True,
+        transfer_required=False,
     )
 
 
@@ -192,6 +210,8 @@ def status():
     return jsonify(
         ok=True,
         status="online",
+        server_ready=True,
+        maintenance=False,
         name=APP_NAME,
         version=APP_VERSION,
         tournament=TOURNAMENT_NAME,
@@ -236,7 +256,7 @@ def login():
         token=p["token"],
         player=player_json(p),
         popup=popup_json(bool(p["transferred"])),
-        can_enter_lobby=bool(p["transferred"]),
+        can_enter_lobby=True,
     )
 
 
@@ -245,7 +265,7 @@ def me():
     p = current_player()
     if not p:
         return err("unauthorized", 401)
-    return jsonify(ok=True, player=player_json(p), can_enter_lobby=bool(p["transferred"]))
+    return jsonify(ok=True, player=player_json(p), can_enter_lobby=True)
 
 
 @app.post("/api/transfer/confirm")
@@ -264,8 +284,6 @@ def lobby_enter():
     p = current_player()
     if not p:
         return err("unauthorized", 401)
-    if not p["transferred"]:
-        return err("transfer_required", 403, popup=popup_json(False))
     return jsonify(
         ok=True,
         lobby={"name": APP_NAME, "version": APP_VERSION, "tournament": TOURNAMENT_NAME},
@@ -284,6 +302,92 @@ def tournaments():
             {"id": TOURNAMENT_ID, "name": TOURNAMENT_NAME, "mode": "1v1", "players_waiting": waiting}
         ]
     )
+
+
+@app.post(f"/api/tournaments/{TOURNAMENT_ID}/join")
+def tournament_join():
+    p = current_player()
+    if not p:
+        return err("unauthorized", 401)
+
+    db = get_db()
+    clean_queue(db)
+    opp = db.execute(
+        "SELECT q.player_id, pl.name FROM queue q JOIN players pl ON pl.id=q.player_id "
+        "WHERE q.player_id != ? ORDER BY q.joined_at LIMIT 1",
+        (p["id"],),
+    ).fetchone()
+
+    if opp:
+        db.execute("DELETE FROM queue WHERE player_id IN (?,?)", (p["id"], opp["player_id"]))
+        cur = db.execute(
+            "INSERT INTO matches (p1, p2, created_at) VALUES (?,?,?)",
+            (opp["player_id"], p["id"], time.time()),
+        )
+        db.commit()
+        return jsonify(
+            ok=True, status="matched", match_id=cur.lastrowid,
+            tournament=TOURNAMENT_NAME, opponent=opp["name"],
+        )
+
+    db.execute("INSERT OR REPLACE INTO queue (player_id, joined_at) VALUES (?,?)", (p["id"], time.time()))
+    db.commit()
+    return jsonify(ok=True, status="waiting", tournament=TOURNAMENT_NAME)
+
+
+@app.post(f"/api/tournaments/{TOURNAMENT_ID}/leave")
+def tournament_leave():
+    p = current_player()
+    if not p:
+        return err("unauthorized", 401)
+    db = get_db()
+    db.execute("DELETE FROM queue WHERE player_id=?", (p["id"],))
+    db.commit()
+    return jsonify(ok=True)
+
+
+@app.post("/api/matches/<int:match_id>/result")
+def match_result(match_id):
+    p = current_player()
+    if not p:
+        return err("unauthorized", 401)
+    db = get_db()
+    m = db.execute("SELECT * FROM matches WHERE id=?", (match_id,)).fetchone()
+    if not m or p["id"] not in (m["p1"], m["p2"]):
+        return err("match_not_found", 404)
+    if m["winner"] is not None:
+        return err("already_reported", 409)
+
+    won = bool(body().get("won"))
+    winner = p["id"] if won else (m["p2"] if p["id"] == m["p1"] else m["p1"])
+    loser = m["p2"] if winner == m["p1"] else m["p1"]
+    db.execute("UPDATE matches SET winner=? WHERE id=?", (winner, match_id))
+    db.execute("UPDATE players SET wins=wins+1 WHERE id=?", (winner,))
+    db.execute("UPDATE players SET losses=losses+1 WHERE id=?", (loser,))
+    db.commit()
+    return jsonify(ok=True, winner_id=winner)
+
+
+@app.get("/api/tournaments/ranking")
+def ranking():
+    rows = get_db().execute(
+        "SELECT name, wins, losses FROM players WHERE wins+losses>0 "
+        "ORDER BY wins DESC, losses ASC LIMIT 50"
+    ).fetchall()
+    return jsonify(
+        tournament=TOURNAMENT_NAME,
+        ranking=[
+            {"position": i + 1, "name": r["name"], "name_html": name_html(r["name"]),
+             "wins": r["wins"], "losses": r["losses"]}
+            for i, r in enumerate(rows)
+        ],
+    )
+
+
+init_db()
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
 
 
 
