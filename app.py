@@ -1,393 +1,391 @@
-import logging
+"""
+Minimal REST backend for the Stumble Lend lobby.
+
+Local run:
+    pip install -r requirements.txt
+    gunicorn app:app
+
+Render start command:
+    gunicorn app:app --access-logfile -
+
+This server stores data in memory. For production, replace the dictionaries
+with a database and set SECRET_KEY through an environment variable.
+"""
+
+from __future__ import annotations
+
 import os
-import random
 import secrets
-import sqlite3
 import time
+import uuid
+from functools import wraps
+from typing import Any, Dict, Optional
 
-from flask import Flask, g, jsonify, request
-from werkzeug.exceptions import HTTPException
-
-# ============ CONFIG ============
-APP_NAME = "Stumble Lend"
-APP_VERSION = "0.50"
-NAME_PREFIX = ".gg/sglend"
-TOURNAMENT_ID = 1
-TOURNAMENT_NAME = "Lend BD 1v1"
-QUEUE_TIMEOUT = 60  # segundos na fila antes de expirar
-DB_PATH = os.environ.get("DB_PATH", "stumble_lend.db")
-
-SUP = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
-UNSUP = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("stumble-lend")
+from flask import Flask, jsonify, request
 
 app = Flask(__name__)
-app.json.ensure_ascii = False
-app.json.sort_keys = False
-
-
-# ============ BANCO ============
-def get_db():
-    if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH, timeout=10)
-        g.db.row_factory = sqlite3.Row
-    return g.db
-
-
-@app.teardown_appcontext
-def close_db(_exc):
-    db = g.pop("db", None)
-    if db is not None:
-        db.close()
-
-
-def init_db():
-    db = sqlite3.connect(DB_PATH)
-    db.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS players (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_id TEXT UNIQUE NOT NULL,
-            name TEXT NOT NULL,
-            token TEXT NOT NULL,
-            transferred INTEGER NOT NULL DEFAULT 0,
-            wins INTEGER NOT NULL DEFAULT 0,
-            losses INTEGER NOT NULL DEFAULT 0,
-            created_at REAL NOT NULL DEFAULT 0,
-            last_login REAL
-        );
-        CREATE TABLE IF NOT EXISTS queue (
-            player_id INTEGER PRIMARY KEY,
-            joined_at REAL NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS matches (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            p1 INTEGER NOT NULL,
-            p2 INTEGER NOT NULL,
-            winner INTEGER,
-            created_at REAL NOT NULL DEFAULT 0
-        );
-        """
-    )
-    # Migração: bancos criados pela versão anterior não têm estas colunas
-    wanted = {
-        "players": {
-            "wins": "INTEGER NOT NULL DEFAULT 0",
-            "losses": "INTEGER NOT NULL DEFAULT 0",
-            "last_login": "REAL",
-            "transferred": "INTEGER NOT NULL DEFAULT 0",
-        },
-        "matches": {"winner": "INTEGER"},
-    }
-    for table, cols in wanted.items():
-        have = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
-        for col, ddl in cols.items():
-            if col not in have:
-                db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
-                log.info("migração: %s.%s adicionada", table, col)
-    db.commit()
-    db.close()
-
-
-# ============ HELPERS ============
-def new_name(db):
-    """.gg/sglend + números em sobrescrito, sem repetir."""
-    for _ in range(50):
-        name = NAME_PREFIX + str(random.randint(100, 99999)).translate(SUP)
-        if not db.execute("SELECT 1 FROM players WHERE name=?", (name,)).fetchone():
-            return name
-    return NAME_PREFIX + str(int(time.time())).translate(SUP)
-
-
-def name_html(name):
-    return f"{NAME_PREFIX}<sup>{name[len(NAME_PREFIX):].translate(UNSUP)}</sup>"
-
-
-def body():
-    return request.get_json(silent=True) or {}
-
-
-def pick(data, *keys):
-    for k in keys:
-        v = data.get(k)
-        if v not in (None, ""):
-            return str(v).strip()
-    return ""
-
-
-def current_player():
-    token = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
-    token = token or request.headers.get("X-Token", "").strip() or pick(body(), "token")
-    if not token:
-        return None
-    return get_db().execute("SELECT * FROM players WHERE token=?", (token,)).fetchone()
-
-
-def err(msg, code=400, **extra):
-    return jsonify(ok=False, error=msg, **extra), code
-
-
-def player_json(p):
-    return {
-        "id": p["id"],
-        "name": p["name"],
-        "name_html": name_html(p["name"]),
-        "wins": p["wins"],
-        "losses": p["losses"],
-    }
-
-
-def popup_json(transferred):
-    return {
-        "show": not transferred,
-        "type": "transfer_items",
-        "title": "Transferir elementos",
-        "message": "Transfira seus elementos para entrar no lobby.",
-        "confirm_endpoint": "/api/transfer/confirm",
-    }
-
-
-def clean_queue(db):
-    db.execute("DELETE FROM queue WHERE joined_at < ?", (time.time() - QUEUE_TIMEOUT,))
+app.config["JSON_SORT_KEYS"] = False
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "change-this-secret-key")
 
 
 @app.after_request
-def no_cache(resp):
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Auth-Token"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
+
+SERVICE_NAME = "Stumble Lend"
+SERVICE_VERSION = "0.50"
+TOURNAMENTS = ["Lend BD 1v1", "Lend LD 1v1"]
+REGIONS = [
+    {"code": "asia", "name": "Asia", "location": "Singapore"},
+    {"code": "au", "name": "Australia", "location": "Sydney"},
+    {"code": "cae", "name": "Canada East", "location": "Montreal"},
+    {"code": "cn", "name": "China Mainland", "location": "Shanghai"},
+    {"code": "eu", "name": "Europe", "location": "Amsterdam"},
+    {"code": "hk", "name": "Hong Kong", "location": "Hong Kong"},
+    {"code": "in", "name": "India", "location": "Chennai"},
+    {"code": "jp", "name": "Japan", "location": "Tokyo"},
+    {"code": "za", "name": "South Africa", "location": "Johannesburg"},
+    {"code": "sa", "name": "South America", "location": "Sao Paulo"},
+    {"code": "kr", "name": "South Korea", "location": "Seoul"},
+    {"code": "tr", "name": "Turkey", "location": "Istanbul"},
+    {"code": "uae", "name": "United Arab Emirates", "location": "Dubai"},
+    {"code": "us", "name": "USA East", "location": "Washington DC"},
+    {"code": "usw", "name": "USA West", "location": "San Jose"},
+    {"code": "ussc", "name": "USA South Central", "location": "Dallas"},
+]
+SERVER_URL = os.environ.get("PUBLIC_BASE_URL", "https://sglend-backend.onrender.com")
+
+# Temporary in-memory storage. Data resets when the Render process restarts.
+USERS: Dict[str, Dict[str, Any]] = {}
+TOKENS: Dict[str, str] = {}
+MATCHES: Dict[str, Dict[str, Any]] = {}
 
 
-@app.errorhandler(HTTPException)
-def http_error(e):
-    return err(e.name.lower().replace(" ", "_"), e.code)
+def now() -> int:
+    return int(time.time())
 
 
-@app.errorhandler(Exception)
-def server_error(e):
-    log.exception("erro interno em %s %s", request.method, request.path)
-    if os.environ.get("DEBUG_ERRORS") == "1":
-        return err("internal_error", 500, detail=f"{type(e).__name__}: {e}")
-    return err("internal_error", 500)
+def json_error(message: str, status: int = 400, code: str = "bad_request"):
+    return jsonify({"ok": False, "error": code, "message": message}), status
 
 
-# ============ ROTAS INFO ============
+def payload() -> Dict[str, Any]:
+    data = request.get_json(silent=True)
+    if isinstance(data, dict):
+        return data
+    return request.form.to_dict()
+
+
+def get_token() -> Optional[str]:
+    header = request.headers.get("Authorization", "")
+    if header.lower().startswith("bearer "):
+        return header[7:].strip()
+    return request.headers.get("X-Auth-Token") or request.args.get("token")
+
+
+def current_user() -> Optional[Dict[str, Any]]:
+    token = get_token()
+    user_id = TOKENS.get(token or "")
+    return USERS.get(user_id) if user_id else None
+
+
+def auth_required(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        user = current_user()
+        if not user:
+            return json_error("authentication required", 401, "unauthorized")
+        return fn(user, *args, **kwargs)
+
+    return wrapped
+
+
+def public_user(user: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": user["id"],
+        "name": SERVICE_NAME,
+        "version": SERVICE_VERSION,
+        "playerName": user["username"],
+        "playername": user["username"],
+        "serverNumber": user["username"].replace(".gg/sglend", ""),
+        "tournamentsname": TOURNAMENTS[0],
+        "tournamentsname2": TOURNAMENTS[1],
+        "userId": user["id"],
+        "username": user["username"],
+        "displayName": user["username"],
+        "trophies": user["trophies"],
+        "crowns": user["crowns"],
+        "coins": user["coins"],
+        "gems": user["gems"],
+        "createdAt": user["createdAt"],
+    }
+
+
+def login_response(user: Dict[str, Any], token: str):
+    player = public_user(user)
+    return {
+        "ok": True,
+        "success": True,
+        "token": token,
+        "accessToken": token,
+        "sessionToken": token,
+        "expiresIn": 60 * 60 * 24 * 30,
+        "user": player,
+        "player": player,
+        "profile": player,
+    }
+
+
 @app.get("/")
 def index():
-    return jsonify(name=APP_NAME, version=APP_VERSION, status="online")
+    return jsonify(
+        {
+            "ok": True,
+            "service": SERVICE_NAME,
+            "game": SERVICE_NAME,
+            "version": SERVICE_VERSION,
+            "tournaments": TOURNAMENTS,
+            "tournamentsname": TOURNAMENTS[0],
+            "tournamentsname2": TOURNAMENTS[1],
+            "status": "online",
+            "health": f"{SERVER_URL}/health",
+        }
+    )
 
 
 @app.get("/health")
+@app.get("/healthz")
+@app.get("/api/health")
 def health():
-    return "ok", 200
+    return jsonify({"ok": True, "status": "ok", "service": "sglend-backend", "timestamp": now()})
 
 
-@app.get("/api/config")
-def config():
-    return jsonify(
-        name=APP_NAME,
-        version=APP_VERSION,
-        lobby_name="MainLobby",
-        tournament={"id": TOURNAMENT_ID, "name": TOURNAMENT_NAME, "mode": "1v1"},
-        player_name_prefix=NAME_PREFIX,
-        login_on_loading_screen=True,
-        transfer_required=False,
-    )
-
-
+@app.get("/version")
 @app.get("/api/version")
 def version():
-    return jsonify(name=APP_NAME, version=APP_VERSION)
+    return jsonify({"ok": True, "version": SERVICE_VERSION, "apiVersion": "v1"})
 
 
-@app.get("/api/status")
-def status():
-    db = get_db()
-    clean_queue(db)
-    players = db.execute("SELECT COUNT(*) c FROM players").fetchone()["c"]
-    waiting = db.execute("SELECT COUNT(*) c FROM queue").fetchone()["c"]
+@app.get("/config")
+@app.get("/api/config")
+@app.get("/api/v1/config")
+def config():
     return jsonify(
-        ok=True,
-        status="online",
-        server_ready=True,
-        maintenance=False,
-        name=APP_NAME,
-        version=APP_VERSION,
-        tournament=TOURNAMENT_NAME,
-        players_registered=players,
-        players_waiting=waiting,
-        server_time=int(time.time()),
+        {
+            "ok": True,
+            "name": SERVICE_NAME,
+            "gameName": SERVICE_NAME,
+            "version": SERVICE_VERSION,
+            "tournaments": TOURNAMENTS,
+            "tournamentsname": TOURNAMENTS[0],
+            "tournamentsname2": TOURNAMENTS[1],
+            "server": SERVER_URL,
+            "apiBaseUrl": SERVER_URL,
+            "maintenance": False,
+            "regions": ["auto"] + [region["code"] for region in REGIONS],
+            "features": {"auth": True, "profile": True, "inventory": True, "matchmaking": True},
+            "defaultRegion": "sa",
+            "bestRegion": True,
+        }
     )
 
 
-# ============ LOGIN / LOBBY ============
-@app.post("/api/user/login")
-@app.post("/api/login")
-def login():
-    data = body()
-    device_id = pick(data, "device_id", "deviceId", "uid", "id")
-    client_version = pick(data, "version", "app_version") or request.headers.get("X-Version", APP_VERSION)
-
-    if not device_id:
-        return err("device_id obrigatório", 400)
-    if client_version != APP_VERSION:
-        return err(f"Versão inválida. Use a {APP_VERSION}", 426)
-
-    db = get_db()
-    now = time.time()
-    p = db.execute("SELECT * FROM players WHERE device_id=?", (device_id,)).fetchone()
-    first_login = p is None
-
-    if first_login:
-        db.execute(
-            "INSERT INTO players (device_id, name, token, created_at, last_login) VALUES (?,?,?,?,?)",
-            (device_id, new_name(db), secrets.token_hex(24), now, now),
-        )
-        log.info("novo jogador device=%s", device_id[:8])
-    else:
-        db.execute("UPDATE players SET last_login=? WHERE id=?", (now, p["id"]))
-    db.commit()
-    p = db.execute("SELECT * FROM players WHERE device_id=?", (device_id,)).fetchone()
-
+@app.get("/bootstrap")
+@app.get("/api/bootstrap")
+@app.get("/api/v1/bootstrap")
+def bootstrap():
     return jsonify(
-        ok=True,
-        first_login=first_login,
-        token=p["token"],
-        player=player_json(p),
-        popup=popup_json(bool(p["transferred"])),
-        can_enter_lobby=True,
+        {
+            "ok": True,
+            "serverTime": now(),
+            "name": SERVICE_NAME,
+            "gameName": SERVICE_NAME,
+            "version": SERVICE_VERSION,
+            "tournaments": TOURNAMENTS,
+            "tournamentsname": TOURNAMENTS[0],
+            "tournamentsname2": TOURNAMENTS[1],
+            "config": {"maintenance": False, "defaultRegion": "sa", "bestRegion": True},
+            "regions": [{"id": "auto", "name": "Best Region", "online": True}] + REGIONS,
+            "endpoints": {
+                "login": "/auth/login",
+                "profile": "/profile",
+                "inventory": "/inventory",
+                "matchmaking": "/matchmaking/join",
+            },
+        }
     )
 
 
-@app.get("/api/user/me")
-def me():
-    p = current_player()
-    if not p:
-        return err("unauthorized", 401)
-    return jsonify(ok=True, player=player_json(p), can_enter_lobby=True)
-
-
-@app.post("/api/transfer/confirm")
-def transfer_confirm():
-    p = current_player()
-    if not p:
-        return err("unauthorized", 401)
-    db = get_db()
-    db.execute("UPDATE players SET transferred=1 WHERE id=?", (p["id"],))
-    db.commit()
-    return jsonify(ok=True, can_enter_lobby=True)
-
-
-@app.post("/api/lobby/enter")
-def lobby_enter():
-    p = current_player()
-    if not p:
-        return err("unauthorized", 401)
-    return jsonify(
-        ok=True,
-        lobby={"name": APP_NAME, "version": APP_VERSION, "tournament": TOURNAMENT_NAME},
-        player=player_json(p),
-    )
-
-
-# ============ TORNEIO ============
+@app.get("/tournaments")
 @app.get("/api/tournaments")
+@app.get("/api/v1/tournaments")
 def tournaments():
-    db = get_db()
-    clean_queue(db)
-    waiting = db.execute("SELECT COUNT(*) c FROM queue").fetchone()["c"]
-    return jsonify(
-        tournaments=[
-            {"id": TOURNAMENT_ID, "name": TOURNAMENT_NAME, "mode": "1v1", "players_waiting": waiting}
-        ]
-    )
-
-
-@app.post(f"/api/tournaments/{TOURNAMENT_ID}/join")
-def tournament_join():
-    p = current_player()
-    if not p:
-        return err("unauthorized", 401)
-
-    db = get_db()
-    clean_queue(db)
-    opp = db.execute(
-        "SELECT q.player_id, pl.name FROM queue q JOIN players pl ON pl.id=q.player_id "
-        "WHERE q.player_id != ? ORDER BY q.joined_at LIMIT 1",
-        (p["id"],),
-    ).fetchone()
-
-    if opp:
-        db.execute("DELETE FROM queue WHERE player_id IN (?,?)", (p["id"], opp["player_id"]))
-        cur = db.execute(
-            "INSERT INTO matches (p1, p2, created_at) VALUES (?,?,?)",
-            (opp["player_id"], p["id"], time.time()),
-        )
-        db.commit()
-        return jsonify(
-            ok=True, status="matched", match_id=cur.lastrowid,
-            tournament=TOURNAMENT_NAME, opponent=opp["name"],
-        )
-
-    db.execute("INSERT OR REPLACE INTO queue (player_id, joined_at) VALUES (?,?)", (p["id"], time.time()))
-    db.commit()
-    return jsonify(ok=True, status="waiting", tournament=TOURNAMENT_NAME)
-
-
-@app.post(f"/api/tournaments/{TOURNAMENT_ID}/leave")
-def tournament_leave():
-    p = current_player()
-    if not p:
-        return err("unauthorized", 401)
-    db = get_db()
-    db.execute("DELETE FROM queue WHERE player_id=?", (p["id"],))
-    db.commit()
-    return jsonify(ok=True)
-
-
-@app.post("/api/matches/<int:match_id>/result")
-def match_result(match_id):
-    p = current_player()
-    if not p:
-        return err("unauthorized", 401)
-    db = get_db()
-    m = db.execute("SELECT * FROM matches WHERE id=?", (match_id,)).fetchone()
-    if not m or p["id"] not in (m["p1"], m["p2"]):
-        return err("match_not_found", 404)
-    if m["winner"] is not None:
-        return err("already_reported", 409)
-
-    won = bool(body().get("won"))
-    winner = p["id"] if won else (m["p2"] if p["id"] == m["p1"] else m["p1"])
-    loser = m["p2"] if winner == m["p1"] else m["p1"]
-    db.execute("UPDATE matches SET winner=? WHERE id=?", (winner, match_id))
-    db.execute("UPDATE players SET wins=wins+1 WHERE id=?", (winner,))
-    db.execute("UPDATE players SET losses=losses+1 WHERE id=?", (loser,))
-    db.commit()
-    return jsonify(ok=True, winner_id=winner)
-
-
-@app.get("/api/tournaments/ranking")
-def ranking():
-    rows = get_db().execute(
-        "SELECT name, wins, losses FROM players WHERE wins+losses>0 "
-        "ORDER BY wins DESC, losses ASC LIMIT 50"
-    ).fetchall()
-    return jsonify(
-        tournament=TOURNAMENT_NAME,
-        ranking=[
-            {"position": i + 1, "name": r["name"], "name_html": name_html(r["name"]),
-             "wins": r["wins"], "losses": r["losses"]}
-            for i, r in enumerate(rows)
+    return jsonify({
+        "ok": True,
+        "tournaments": [
+            {"id": "lend_bd_1v1", "name": TOURNAMENTS[0], "mode": "1v1", "enabled": True},
+            {"id": "lend_ld_1v1", "name": TOURNAMENTS[1], "mode": "1v1", "enabled": True},
         ],
+    })
+
+
+@app.post("/auth/register")
+@app.post("/api/auth/register")
+@app.post("/api/v1/auth/register")
+def register():
+    data = payload()
+    username = str(data.get("username") or data.get("name") or "").strip()[:32]
+    if not username:
+        username = f".gg/sglend{secrets.randbelow(900000) + 100000}"
+
+    user_id = str(uuid.uuid4())
+    user = {
+        "id": user_id,
+        "username": username,
+        "password": str(data.get("password") or ""),
+        "trophies": 0,
+        "crowns": 0,
+        "coins": 5000,
+        "gems": 10000,
+        "createdAt": now(),
+    }
+    USERS[user_id] = user
+    token = secrets.token_urlsafe(32)
+    TOKENS[token] = user_id
+    return jsonify(login_response(user, token)), 201
+
+
+@app.post("/auth/login")
+@app.post("/api/auth/login")
+@app.post("/api/v1/auth/login")
+@app.post("/login")
+@app.post("/api/login")
+@app.post("/api/v1/login")
+def login():
+    data = payload()
+    username = str(data.get("username") or data.get("email") or data.get("name") or "").strip()
+    user = next((u for u in USERS.values() if u["username"] == username), None)
+    if user is None:
+        # For lobby testing, create the player automatically on first access.
+        user_id = str(uuid.uuid4())
+        user = {
+            "id": user_id,
+            "username": username or f".gg/sglend{secrets.randbelow(900000) + 100000}",
+            "password": str(data.get("password") or ""),
+            "trophies": 0,
+            "crowns": 0,
+            "coins": 5000,
+            "gems": 10000,
+            "createdAt": now(),
+        }
+        USERS[user_id] = user
+    token = secrets.token_urlsafe(32)
+    TOKENS[token] = user["id"]
+    return jsonify(login_response(user, token))
+
+
+@app.get("/profile")
+@app.get("/api/profile")
+@app.get("/api/v1/profile")
+@app.get("/me")
+@app.get("/api/me")
+@app.get("/api/v1/me")
+@auth_required
+def profile(user):
+    return jsonify({"ok": True, "user": public_user(user), "player": public_user(user), "profile": public_user(user)})
+
+
+@app.get("/inventory")
+@app.get("/api/inventory")
+@app.get("/api/v1/inventory")
+@auth_required
+def inventory(user):
+    return jsonify(
+        {
+            "ok": True,
+            "userId": user["id"],
+            "items": [],
+            "skins": [],
+            "emotes": [],
+            "selectedSkin": None,
+        }
     )
 
 
-init_db()
+@app.get("/regions")
+@app.get("/api/regions")
+@app.get("/api/v1/regions")
+def regions():
+    return jsonify({"ok": True, "defaultRegion": "sa", "bestRegion": True, "regions": [{"id": "auto", "code": "auto", "name": "Best Region", "online": True, "players": 0}] + [{**region, "id": region["code"], "online": True, "players": 0} for region in REGIONS]})
+
+
+@app.post("/matchmaking/join")
+@app.post("/api/matchmaking/join")
+@app.post("/api/v1/matchmaking/join")
+@app.post("/matchmaking")
+@auth_required
+def matchmaking_join(user):
+    data = payload()
+    match_id = str(uuid.uuid4())
+    MATCHES[match_id] = {
+        "id": match_id,
+        "matchId": match_id,
+        "status": "waiting",
+        "mode": data.get("mode", "classic"),
+        "region": data.get("region", "auto"),
+        "players": [{"id": user["id"], "username": user["username"]}],
+        "createdAt": now(),
+    }
+    return jsonify({"ok": True, "success": True, "match": MATCHES[match_id], "room": MATCHES[match_id]})
+
+
+@app.get("/matchmaking/status/<match_id>")
+@app.get("/api/matchmaking/status/<match_id>")
+@app.get("/api/v1/matchmaking/status/<match_id>")
+@auth_required
+def matchmaking_status(user, match_id):
+    match = MATCHES.get(match_id)
+    if not match:
+        return json_error("match not found", 404, "not_found")
+    return jsonify({"ok": True, "match": match, "status": match["status"]})
+
+
+@app.get("/playername")
+@app.get("/api/playername")
+@app.get("/api/v1/playername")
+def playername():
+    number = secrets.randbelow(900000) + 100000
+    name = f".gg/sglend{number}"
+    return jsonify({"ok": True, "playername": name, "playerName": name, "serverNumber": str(number)})
+
+
+@app.post("/logout")
+@app.post("/api/logout")
+@app.post("/api/v1/logout")
+def logout():
+    token = get_token()
+    if token:
+        TOKENS.pop(token, None)
+    return jsonify({"ok": True, "success": True})
+
+
+@app.errorhandler(404)
+def not_found(_error):
+    return json_error("not_found", 404, "not_found")
+
+
+@app.errorhandler(405)
+def method_not_allowed(_error):
+    return json_error("method_not_allowed", 405, "method_not_allowed")
+
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port, debug=False)
+
 
 
 
