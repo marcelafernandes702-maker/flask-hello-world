@@ -168,6 +168,9 @@ def bootstrap():
 @app.post("/auth/login")
 @app.post("/api/auth/login")
 @app.post("/api/v1/auth/login")
+@app.post("/user/login")
+@app.post("/api/user/login")
+@app.post("/api/v1/user/login")
 @app.post("/login")
 @app.post("/api/login")
 @app.post("/api/v1/login")
@@ -293,6 +296,7 @@ def method_not_allowed(_error):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "10000")), debug=False)
+
 
 
 
