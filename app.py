@@ -9,7 +9,7 @@ import uuid
 from functools import wraps
 from typing import Any, Dict, Optional
 
-from flask import Flask, jsonify, request
+from flask import Flask, g, jsonify, request
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
@@ -24,6 +24,7 @@ REGIONS = ["auto", "asia", "au", "cae", "cn", "eu", "hk", "in", "jp", "za", "sa"
 USERS: Dict[str, Dict[str, Any]] = {}
 TOKENS: Dict[str, str] = {}
 MATCHES: Dict[str, Dict[str, Any]] = {}
+RECENT_REQUESTS = []
 
 
 def now() -> int:
@@ -99,8 +100,26 @@ def new_player(username: str = "") -> Dict[str, Any]:
     return user
 
 
+@app.before_request
+def record_request():
+    """Keep a short, credential-free request history for troubleshooting."""
+    record = {
+        "method": request.method,
+        "path": request.path,
+        "queryKeys": sorted(request.args.keys()),
+        "bodyKeys": sorted((request.get_json(silent=True) or {}).keys()) if request.is_json else [],
+        "userAgent": request.headers.get("User-Agent", "")[:120],
+        "timestamp": now(),
+    }
+    RECENT_REQUESTS.append(record)
+    del RECENT_REQUESTS[:-30]
+    g.request_record = record
+
+
 @app.after_request
 def cors(response):
+    if hasattr(g, "request_record"):
+        g.request_record["status"] = response.status_code
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Auth-Token"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
@@ -212,6 +231,11 @@ def playername():
     return jsonify({"ok": True, "playerName": value, "playername": value, "serverNumber": str(number)})
 
 
+@app.get("/debug/requests")
+def debug_requests():
+    return jsonify({"ok": True, "requests": RECENT_REQUESTS[-30:]})
+
+
 @app.get("/shared/<int:version>/<path:key>")
 def shared_config(version: int, key: str):
     """Return an empty shared configuration object for the Unity bootstrap request."""
@@ -269,6 +293,7 @@ def method_not_allowed(_error):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "10000")), debug=False)
+
 
 
 
