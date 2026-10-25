@@ -212,6 +212,17 @@ def playername():
     return jsonify({"ok": True, "playerName": value, "playername": value, "serverNumber": str(number)})
 
 
+@app.get("/shared/<int:version>/<path:key>")
+def shared_config(version: int, key: str):
+    """Return an empty shared configuration object for the Unity bootstrap request."""
+    return jsonify({
+        "ok": True,
+        "version": version,
+        "key": key,
+        "data": {},
+    })
+
+
 @app.post("/matchmaking/join")
 @app.post("/api/matchmaking/join")
 @app.post("/api/v1/matchmaking/join")
@@ -258,6 +269,7 @@ def method_not_allowed(_error):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "10000")), debug=False)
+
 
 
 
