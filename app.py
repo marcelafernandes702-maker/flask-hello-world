@@ -211,6 +211,24 @@ def inventory(user):
     return jsonify({"ok": True, "userId": user["id"], "items": [], "skins": [], "emotes": [], "selectedSkin": None})
 
 
+@app.post("/user/inventory/selection")
+@app.post("/api/user/inventory/selection")
+@app.post("/api/v1/user/inventory/selection")
+@requires_auth
+def inventory_selection(user):
+    data = body()
+    category = str(data.get("Category") or data.get("category") or "")
+    item_id = str(data.get("ItemId") or data.get("itemId") or "")
+    return jsonify({
+        "ok": True,
+        "success": True,
+        "userId": user["id"],
+        "category": category,
+        "itemId": item_id,
+        "selected": True,
+    })
+
+
 @app.get("/regions")
 @app.get("/api/regions")
 @app.get("/api/v1/regions")
@@ -296,6 +314,7 @@ def method_not_allowed(_error):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "10000")), debug=False)
+
 
 
 
