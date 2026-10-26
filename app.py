@@ -214,9 +214,9 @@ def inventory(user):
 @app.post("/user/inventory/selection")
 @app.post("/api/user/inventory/selection")
 @app.post("/api/v1/user/inventory/selection")
-@requires_auth
-def inventory_selection(user):
+def inventory_selection():
     data = body()
+    user = get_user() or new_player()
     category = str(data.get("Category") or data.get("category") or "")
     item_id = str(data.get("ItemId") or data.get("itemId") or "")
     return jsonify({
@@ -314,6 +314,7 @@ def method_not_allowed(_error):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "10000")), debug=False)
+
 
 
 
