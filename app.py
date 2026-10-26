@@ -181,7 +181,27 @@ def login():
     access_token = secrets.token_urlsafe(32)
     TOKENS[access_token] = user["id"]
     player = player_data(user)
-    return jsonify({"ok": True, "success": True, "token": access_token, "accessToken": access_token, "sessionToken": access_token, "expiresIn": 2592000, "user": player, "player": player, "profile": player})
+    result = {
+        "ok": True,
+        "success": True,
+        "authenticated": True,
+        "token": access_token,
+        "accessToken": access_token,
+        "access_token": access_token,
+        "sessionToken": access_token,
+        "session_token": access_token,
+        "expiresIn": 2592000,
+        "userId": user["id"],
+        "playerId": user["id"],
+        "stumbleId": user["id"],
+        "user": player,
+        "player": player,
+        "profile": player,
+        "data": {"token": access_token, "accessToken": access_token, "user": player, "player": player, "profile": player},
+        "result": {"token": access_token, "accessToken": access_token, "user": player, "player": player, "profile": player},
+        "photon": {"appId": "6fe8305a-ef22-40f2-9c0e-3052a8adec0d", "regions": ["sa", "us", "usw", "eu"]},
+    }
+    return jsonify(result)
 
 
 @app.post("/auth/register")
@@ -314,6 +334,7 @@ def method_not_allowed(_error):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "10000")), debug=False)
+
 
 
 
