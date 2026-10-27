@@ -1,9 +1,12 @@
-# README
+# LEBS Stumble Backend
 
-This is the [Flask](http://flask.pocoo.org/) [quick start](http://flask.pocoo.org/docs/1.0/quickstart/#a-minimal-application) example for [Render](https://render.com).
+Test backend for Stumble Guys 0.50 using FastAPI.
 
-The app in this repo is deployed at [https://flask.onrender.com](https://flask.onrender.com).
+## Project structure
 
-## Deployment
+```text
+LEBS_STUMBLE_BACKEND/
+├── main.py
+├── requirements.txt
+└── README.md
 
-Follow the guide at https://render.com/docs/deploy-flask.
