@@ -16,6 +16,7 @@ app = FastAPI(
 users = {}
 tokens = {}
 
+
 BOOTSTRAP = {
     "gameVersion": "0.50",
     "backendVersion": "LEBS-0.50",
@@ -28,18 +29,20 @@ BOOTSTRAP = {
     },
 }
 
+
 CONFIG = {
     "gameVersion": "0.50",
     "region": "sa",
     "features": {
         "inventory": True,
         "profile": True,
-        "photonRealtime": False,
+        "photonRealtime": True,
     },
     "photon": {
-        "enabled": False,
+        "enabled": True,
+        "appId": "6fe8305a-ef22-40f2-9c0e-3052a8adec0d",
         "region": "sa",
-        "note": "Configure your own Photon server.",
+        "regions": "sa;us;usw;eu",
     },
 }
 
@@ -146,7 +149,8 @@ def inventory_selection(
     authorization: Optional[str] = Header(default=None),
     accessToken: Optional[str] = None,
 ):
-    # Accept Authorization: Bearer <token> or an accessToken query parameter.
+    # Accept Authorization: Bearer <token>
+    # or an accessToken query parameter.
     bearer = None
 
     if authorization:
@@ -187,6 +191,7 @@ def home():
         "status": "online",
         "docs": "/docs",
     }
+
 
 
 
