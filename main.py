@@ -50,7 +50,7 @@ app.add_middleware(
 USERS: dict[str, dict[str, Any]] = {}
 TOKENS: dict[str, str] = {}
 MATCHES: dict[str, dict[str, Any]] = {}
-REQUEST_LOG: list[dict[str, Any]] = {}
+REQUEST_LOG: list[dict[str, Any]] = []
 
 
 class FlexibleBody(BaseModel):
@@ -645,6 +645,7 @@ def logout(
         "ok": True,
         "success": True,
     }
+
 
 
 
