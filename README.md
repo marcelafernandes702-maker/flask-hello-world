@@ -1,11 +1,16 @@
 # LEBS Stumble Backend
 
-FastAPI backend compatible with Stumble Guys 0.50.
+Compatibility backend for Stumble Guys 0.50 using FastAPI.
 
-## Install
+## Project structure
 
-```bash
-pip install -r requirements.txt
+```text
+main.py
+requirements.txt
+README.md
+render.yaml
+START_COMMAND.txt
+
 
 
 
