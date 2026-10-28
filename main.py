@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 SERVICE_NAME = "Stumble Lend"
 GAME_VERSION = "0.50"
 BACKEND_VERSION = "LEBS-0.50"
+
 PUBLIC_BASE_URL = os.getenv(
     "PUBLIC_BASE_URL",
     "https://sglend-backend.onrender.com",
@@ -23,13 +24,19 @@ PUBLIC_BASE_URL = os.getenv(
 PHOTON_APP_ID = "6fe8305a-ef22-40f2-9c0e-3052a8adec0d"
 PHOTON_REGIONS = ["sa", "us", "usw", "eu"]
 DEFAULT_REGION = "sa"
-TOURNAMENTS = ["Lend BD 1v1", "Lend LD 1v1"]
+
+TOURNAMENTS = [
+    "Lend BD 1v1",
+    "Lend LD 1v1",
+]
+
 
 app = FastAPI(
     title="LEBS Stumble Backend",
     description="Compatibility backend for Stumble Guys 0.50",
     version="0.50.0",
 )
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,10 +46,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 USERS: dict[str, dict[str, Any]] = {}
 TOKENS: dict[str, str] = {}
 MATCHES: dict[str, dict[str, Any]] = {}
-REQUEST_LOG: list[dict[str, Any]] = []
+REQUEST_LOG: list[dict[str, Any]] = {}
 
 
 class FlexibleBody(BaseModel):
@@ -637,6 +645,7 @@ def logout(
         "ok": True,
         "success": True,
     }
+
 
 
 
