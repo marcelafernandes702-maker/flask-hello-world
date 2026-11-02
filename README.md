@@ -1,15 +1,14 @@
-# LEBS Stumble Backend
+# Stumble Shade Backend — versão 0.56
 
-Compatibility backend for Stumble Guys 0.50 using FastAPI.
+Backend Flask para testar o fluxo inicial do Stumble Shade: popup de transferência na tela de carregamento, entrada no lobby, card do torneio e dois torneios separados.
 
-## Project structure
+## Arquivos
 
 ```text
 main.py
 requirements.txt
 README.md
-render.yaml
-START_COMMAND.txt
+
 
 
 
