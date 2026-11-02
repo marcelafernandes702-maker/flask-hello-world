@@ -28,7 +28,7 @@ def player_payload(player_id=DEFAULT_PLAYER_ID, nickname=DEFAULT_NICKNAME):
         "nicknameSuffix": player_id,
         "displayName": f"{nickname}{superscript(player_id)}",
         "level": 1,
-        "isBot": False
+        "isBot": False,
     }
 
 
@@ -227,6 +227,7 @@ def first_load():
 @app.post("/api/login")
 @app.post("/api/auth/login")
 @app.post("/login")
+@app.post("/user/login")
 def login():
     player = find_player()
 
@@ -234,7 +235,63 @@ def login():
         "success": True,
         "version": VERSION,
         "player": player,
+        "accessToken": f"local-{player['playerId']}",
+        "refreshToken": f"refresh-{player['playerId']}",
         "status": "ready"
+    })
+
+
+@app.post("/user/refresh")
+def user_refresh():
+    player = next(
+        iter(players.values()),
+        player_payload()
+    )
+
+    return jsonify({
+        "success": True,
+        "version": VERSION,
+        "player": player,
+        "accessToken": f"local-{player['playerId']}",
+        "refreshToken": f"refresh-{player['playerId']}",
+        "status": "ready"
+    })
+
+
+@app.get("/user/profile")
+def user_profile():
+    player = next(
+        iter(players.values()),
+        player_payload()
+    )
+
+    return jsonify({
+        "success": True,
+        "version": VERSION,
+        "player": player,
+        "profile": player
+    })
+
+
+@app.post("/pusher/authenticate")
+def pusher_authenticate():
+    data = request.get_json(silent=True) or {}
+
+    socket_id = str(
+        data.get("socket_id")
+        or request.form.get("socket_id")
+        or ""
+    )
+
+    channel_name = str(
+        data.get("channel_name")
+        or request.form.get("channel_name")
+        or ""
+    )
+
+    return jsonify({
+        "auth": f"local-auth:{socket_id}:{channel_name}",
+        "channel_data": "{\"user_id\":\"1923\"}"
     })
 
 
@@ -523,6 +580,7 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=port
     )
+
 
 
 
