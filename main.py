@@ -1,650 +1,529 @@
-from __future__ import annotations
-
 import os
-import secrets
 import time
-import uuid
-from datetime import datetime, timezone
-from typing import Any, Optional
+from flask import Flask, jsonify, request
+from flask_cors import CORS
 
-from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+app = Flask(__name__)
+CORS(app)
 
+VERSION = "0.56"
+DEFAULT_PLAYER_ID = "1923"
+DEFAULT_NICKNAME = ".gg/sgshade"
 
-SERVICE_NAME = "Stumble Lend"
-GAME_VERSION = "0.50"
-BACKEND_VERSION = "LEBS-0.50"
-
-PUBLIC_BASE_URL = os.getenv(
-    "PUBLIC_BASE_URL",
-    "https://sglend-backend.onrender.com",
-).rstrip("/")
-
-PHOTON_APP_ID = "6fe8305a-ef22-40f2-9c0e-3052a8adec0d"
-PHOTON_REGIONS = ["sa", "us", "usw", "eu"]
-DEFAULT_REGION = "sa"
-
-TOURNAMENTS = [
-    "Lend BD 1v1",
-    "Lend LD 1v1",
-]
+players = {}
+joined_players = {}
 
 
-app = FastAPI(
-    title="LEBS Stumble Backend",
-    description="Compatibility backend for Stumble Guys 0.50",
-    version="0.50.0",
-)
+def superscript(value: str) -> str:
+    table = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+    return str(value).translate(table)
 
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def player_payload(player_id=DEFAULT_PLAYER_ID, nickname=DEFAULT_NICKNAME):
+    player_id = str(player_id)
 
-
-USERS: dict[str, dict[str, Any]] = {}
-TOKENS: dict[str, str] = {}
-MATCHES: dict[str, dict[str, Any]] = {}
-REQUEST_LOG: list[dict[str, Any]] = []
-
-
-class FlexibleBody(BaseModel):
-    model_config = {"extra": "allow"}
-
-    userId: Optional[str] = None
-    playerId: Optional[str] = None
-    username: Optional[str] = None
-    player: Optional[dict[str, Any]] = None
-    profile: Optional[dict[str, Any]] = None
-    data: Optional[dict[str, Any]] = None
-    selection: dict[str, Any] = Field(default_factory=dict)
-
-
-def now() -> int:
-    return int(time.time())
-
-
-def photon_data() -> dict[str, Any]:
     return {
-        "enabled": True,
-        "appId": PHOTON_APP_ID,
-        "photonAppId": PHOTON_APP_ID,
-        "region": DEFAULT_REGION,
-        "photonRegion": DEFAULT_REGION,
-        "regions": PHOTON_REGIONS,
-        "regionList": PHOTON_REGIONS,
-        "appVersion": GAME_VERSION,
+        "playerId": player_id,
+        "nickname": nickname,
+        "nicknameSuffix": player_id,
+        "displayName": f"{nickname}{superscript(player_id)}",
+        "level": 1,
+        "isBot": False
     }
 
 
-def player_data(user: dict[str, Any]) -> dict[str, Any]:
+def tournament_template(tournament_id):
+    if tournament_id == "1v1_bd":
+        name = "Shade BD 1v1"
+        card_title = "1v1 BD"
+        game_map = "Block Dash"
+        description = "Venha jogar stumble shade: https://discord.gg/sgshade"
+        amount = 0
+    else:
+        name = "Shade 1v1 LASER"
+        card_title = "1v1 LASER"
+        game_map = "Laser Tracer"
+        description = "Venha jogar Stumble Shade: https://discord.gg/sgshade"
+        amount = 50
+
+    current = len(joined_players.get(tournament_id, {}))
+
     return {
-        "id": user["id"],
-        "userId": user["id"],
-        "playerId": user["id"],
-        "username": user["username"],
-        "displayName": user["username"],
-        "playerName": user["username"],
-        "playername": user["username"],
-        "name": SERVICE_NAME,
-        "version": GAME_VERSION,
-        "trophies": user["trophies"],
-        "crowns": user["crowns"],
-        "coins": user["coins"],
-        "gems": user["gems"],
-        "createdAt": user["createdAt"],
-        "tournamentsname": TOURNAMENTS[0],
-        "tournamentsname2": TOURNAMENTS[1],
-    }
-
-
-def create_user(username: str = "") -> dict[str, Any]:
-    username = username.strip()[:32] if username else ""
-
-    if not username:
-        username = f".gg/sglend{secrets.randbelow(900000) + 100000}"
-
-    user = {
-        "id": str(uuid.uuid4()),
-        "username": username,
-        "trophies": 0,
-        "crowns": 0,
-        "coins": 5000,
-        "gems": 10000,
-        "createdAt": datetime.now(timezone.utc).isoformat(),
-        "inventory": {},
-    }
-
-    USERS[user["id"]] = user
-    return user
-
-
-def token_from_request(
-    authorization: Optional[str] = None,
-    x_auth_token: Optional[str] = None,
-    access_token: Optional[str] = None,
-    token: Optional[str] = None,
-) -> Optional[str]:
-    if authorization and authorization.lower().startswith("bearer "):
-        return authorization[7:].strip()
-
-    return x_auth_token or access_token or token
-
-
-def get_user_from_token(token: Optional[str]) -> Optional[dict[str, Any]]:
-    user_id = TOKENS.get(token or "")
-    return USERS.get(user_id or "")
-
-
-def require_user(
-    authorization: Optional[str] = None,
-    x_auth_token: Optional[str] = None,
-    access_token: Optional[str] = None,
-    token: Optional[str] = None,
-) -> dict[str, Any]:
-    user = get_user_from_token(
-        token_from_request(
-            authorization,
-            x_auth_token,
-            access_token,
-            token,
-        )
-    )
-
-    if user is None:
-        raise HTTPException(
-            status_code=401,
-            detail="authentication required",
-        )
-
-    return user
-
-
-def common_config() -> dict[str, Any]:
-    return {
-        "name": SERVICE_NAME,
-        "gameName": SERVICE_NAME,
-        "gameVersion": GAME_VERSION,
-        "version": GAME_VERSION,
-        "backendVersion": BACKEND_VERSION,
-        "server": PUBLIC_BASE_URL,
-        "apiBaseUrl": PUBLIC_BASE_URL,
-        "maintenance": False,
-        "defaultRegion": DEFAULT_REGION,
-        "bestRegion": True,
-        "regions": PHOTON_REGIONS,
-        "features": {
-            "auth": True,
-            "profile": True,
-            "inventory": True,
-            "matchmaking": True,
-            "photonRealtime": True,
+        "id": tournament_id,
+        "name": name,
+        "map": game_map,
+        "rounds": 1,
+        "players": {
+            "current": current,
+            "max": 2
         },
-        "photon": photon_data(),
-        "tournaments": TOURNAMENTS,
-        "tournamentsname": TOURNAMENTS[0],
-        "tournamentsname2": TOURNAMENTS[1],
+        "entry": {
+            "currency": "gems",
+            "amount": amount
+        },
+        "status": "open",
+        "expiresIn": "364d 18h 45m",
+        "card": {
+            "label": "Torneios",
+            "badge": "+1",
+            "time": "Tempo restante: 364d 18h 45m",
+            "title": card_title,
+            "image": game_map
+        },
+        "details": {
+            "title": name,
+            "description": description,
+            "players": f"{current}/2",
+            "rounds": 1,
+            "emotes": "Padrão",
+            "type": "Padrão",
+            "maps": [
+                {
+                    "round": "Ronda 1",
+                    "name": game_map
+                }
+            ],
+            "prizes": [
+                "1º",
+                "2º a 8º",
+                "9º a 16º"
+            ],
+            "button": "PARTICIPAR",
+            "entryButton": str(amount)
+        }
     }
 
 
-@app.middleware("http")
-async def request_logger(request: Request, call_next):
-    response = await call_next(request)
+def all_tournaments():
+    return [
+        tournament_template("1v1_bd"),
+        tournament_template("1v1_laser")
+    ]
 
-    REQUEST_LOG.append(
-        {
-            "method": request.method,
-            "path": request.url.path,
-            "status": response.status_code,
-            "timestamp": now(),
-        }
+
+def find_player():
+    data = request.get_json(silent=True) or {}
+
+    player_id = str(
+        data.get("playerId")
+        or request.headers.get("X-User-Id")
+        or request.headers.get("X-Device-Id")
+        or DEFAULT_PLAYER_ID
     )
 
-    del REQUEST_LOG[:-50]
-    return response
+    nickname = (
+        data.get("nickname")
+        or request.headers.get("X-Nickname")
+        or DEFAULT_NICKNAME
+    )
+
+    player = player_payload(player_id, nickname)
+    players[player_id] = player
+
+    return player
 
 
 @app.get("/")
-def home():
-    return {
-        "ok": True,
-        "name": SERVICE_NAME,
-        "game": SERVICE_NAME,
-        "version": GAME_VERSION,
-        "status": "online",
-        "health": f"{PUBLIC_BASE_URL}/health",
-        "docs": "/docs",
-    }
+def root():
+    return jsonify({
+        "name": "Stumble Shade Backend",
+        "version": VERSION,
+        "status": "ok"
+    })
 
 
 @app.get("/health")
-@app.get("/healthz")
-@app.get("/api/health")
 def health():
-    return {
-        "ok": True,
+    return jsonify({
         "status": "ok",
-        "version": GAME_VERSION,
-    }
+        "service": "stumble-shade",
+        "version": VERSION
+    })
 
 
 @app.get("/status")
-@app.get("/api/status")
-@app.get("/api/v1/status")
 def status():
-    return {
-        "ok": True,
+    return jsonify({
         "status": "online",
-        "service": SERVICE_NAME,
-        "version": GAME_VERSION,
-        "backend": PUBLIC_BASE_URL,
-        "timestamp": now(),
-    }
+        "version": VERSION
+    })
 
 
-@app.get("/config")
-@app.get("/api/config")
-@app.get("/api/v1/config")
-def config():
-    settings = common_config()
-
-    return {
-        "ok": True,
-        "result": "success",
-        "data": settings,
-        **settings,
-    }
+@app.get("/version")
+def version():
+    return jsonify({
+        "version": VERSION
+    })
 
 
-@app.get("/bootstrap")
-@app.get("/api/bootstrap")
-@app.get("/api/v1/bootstrap")
-def bootstrap():
-    endpoints = {
-        "login": "/api/user/login",
-        "profile": "/api/profile",
-        "inventory": "/api/user/inventory/selection",
-        "shared": "/shared/1/NULL",
-        "matchmaking": "/api/matchmaking/join",
-        "matchmakingFilter": "/api/matchmaking/filter",
-        "photon": "/api/photon/config",
-    }
+@app.get("/configuration")
+def configuration():
+    return jsonify({
+        "success": True,
+        "version": VERSION,
+        "game": "Stumble Shade",
+        "firstLoad": {
+            "screen": "loading",
+            "showPopupOnce": True,
+            "storageKey": "stumble_shade_first_load_v056",
+            "flow": [
+                {
+                    "step": 1,
+                    "screen": "loading",
+                    "action": "show_popup_once",
+                    "title": "Transferir elementos",
+                    "button": "OK"
+                },
+                {
+                    "step": 2,
+                    "screen": "loading",
+                    "action": "download_progress",
+                    "text": "Transferindo elementos essenciais... ({0}/100%)",
+                    "initialProgress": 0
+                },
+                {
+                    "step": 3,
+                    "screen": "loading",
+                    "action": "download_complete",
+                    "text": "Transferência de elementos essenciais concluída!",
+                    "progress": 100
+                },
+                {
+                    "step": 4,
+                    "screen": "lobby",
+                    "action": "open_lobby"
+                }
+            ],
+            "title": "Transferir elementos",
+            "message": (
+                "Atualização necessária!\n"
+                "Transferir 69,43 MB de dados?\n"
+                "(Recomenda-se a ligação por WIFI)"
+            ),
+            "button": "OK",
+            "progressText": "Transferindo elementos essenciais... ({0}/100%)",
+            "completeText": "Transferência de elementos essenciais concluída!"
+        },
+        "lobby": {
+            "tournamentCard": {
+                "visibleName": "Card do torneio",
+                "internalName": "PLAY_VIEW_TournamentXButton",
+                "label": "Torneios",
+                "badge": "+1",
+                "time": "Tempo restante: 364d 18h 45m",
+                "title": "1v1 BD",
+                "image": "Block Dash"
+            }
+        }
+    })
 
-    settings = common_config()
 
-    return {
-        "ok": True,
-        "result": "success",
-        "name": SERVICE_NAME,
-        "gameVersion": GAME_VERSION,
-        "backendVersion": BACKEND_VERSION,
-        "maintenance": False,
-        "serverTime": now(),
-        "endpoints": endpoints,
-        "services": endpoints,
-        "config": settings,
-        "data": settings,
-    }
+@app.get("/api/0.56/first-load")
+def first_load():
+    """Retorna a sequência visual da primeira entrada no jogo."""
+    return configuration()
 
 
-@app.get("/photon/config")
-@app.get("/api/photon/config")
-def photon_config():
-    settings = photon_data()
-
-    return {
-        "ok": True,
-        "result": "success",
-        "photon": settings,
-        **settings,
-    }
-
-
-@app.post("/auth/login")
-@app.post("/api/auth/login")
-@app.post("/api/v1/auth/login")
-@app.post("/login")
 @app.post("/api/login")
-@app.post("/api/v1/login")
-@app.post("/user/login")
-@app.post("/api/user/login")
-@app.post("/api/v1/user/login")
-def login(body: FlexibleBody):
-    requested_id = body.userId or body.playerId
-    user = USERS.get(requested_id or "")
+@app.post("/api/auth/login")
+@app.post("/login")
+def login():
+    player = find_player()
 
-    if user is None:
-        user = create_user(body.username or "")
-
-    access_token = secrets.token_urlsafe(32)
-    TOKENS[access_token] = user["id"]
-
-    player = player_data(user)
-
-    return {
-        "ok": True,
+    return jsonify({
         "success": True,
-        "authenticated": True,
-        "result": "success",
-        "token": access_token,
-        "accessToken": access_token,
-        "access_token": access_token,
-        "sessionToken": access_token,
-        "session_token": access_token,
-        "expiresIn": 2592000,
-        "userId": user["id"],
-        "playerId": user["id"],
-        "stumbleId": user["id"],
-        "user": player,
+        "version": VERSION,
         "player": player,
-        "profile": player,
-        "photon": photon_data(),
-        "photonJwt": access_token,
-        "data": {
-            "token": access_token,
-            "accessToken": access_token,
-            "user": player,
-            "player": player,
-            "profile": player,
-            "photon": photon_data(),
-            "photonJwt": access_token,
-        },
-    }
+        "status": "ready"
+    })
 
 
-@app.get("/profile")
 @app.get("/me")
+def me():
+    player = next(
+        iter(players.values()),
+        player_payload()
+    )
+
+    return jsonify(player)
+
+
+@app.get("/me/<path:subpath>")
+def me_subpath(subpath):
+    player = next(
+        iter(players.values()),
+        player_payload()
+    )
+
+    if subpath == "permissions":
+        return jsonify({
+            "permissions": []
+        })
+
+    if subpath == "rewards":
+        return jsonify({
+            "rewards": []
+        })
+
+    if subpath.startswith("milestones"):
+        return jsonify({
+            "milestones": []
+        })
+
+    return jsonify(player)
+
+
+@app.get("/api/player")
 @app.get("/api/profile")
-@app.get("/api/me")
-@app.get("/api/v1/profile")
-@app.get("/api/v1/me")
-def profile(
-    authorization: Optional[str] = Header(default=None),
-    x_auth_token: Optional[str] = Header(default=None),
-    accessToken: Optional[str] = None,
-    token: Optional[str] = None,
-):
-    user = require_user(
-        authorization,
-        x_auth_token,
-        accessToken,
-        token,
-    )
-
-    player = player_data(user)
-
-    return {
-        "ok": True,
-        "result": "success",
-        "user": player,
-        "player": player,
-        "profile": player,
-    }
-
-
-@app.get("/inventory")
-@app.get("/api/inventory")
-@app.get("/api/v1/inventory")
-def inventory(
-    authorization: Optional[str] = Header(default=None),
-    x_auth_token: Optional[str] = Header(default=None),
-    accessToken: Optional[str] = None,
-    token: Optional[str] = None,
-):
-    user = require_user(
-        authorization,
-        x_auth_token,
-        accessToken,
-        token,
-    )
-
-    return {
-        "ok": True,
-        "result": "success",
-        "userId": user["id"],
-        "items": [],
-        "skins": [],
-        "emotes": [],
-        "selectedSkin": user["inventory"].get("skin"),
-        "inventory": user["inventory"],
-    }
-
-
-@app.post("/user/inventory/selection")
-@app.post("/api/user/inventory/selection")
-@app.post("/api/v1/user/inventory/selection")
-def inventory_selection(
-    body: FlexibleBody,
-    authorization: Optional[str] = Header(default=None),
-    x_auth_token: Optional[str] = Header(default=None),
-    accessToken: Optional[str] = None,
-    token: Optional[str] = None,
-):
-    user = get_user_from_token(
-        token_from_request(
-            authorization,
-            x_auth_token,
-            accessToken,
-            token,
+def api_player():
+    return jsonify({
+        "success": True,
+        "player": next(
+            iter(players.values()),
+            player_payload()
         )
-    )
+    })
 
-    if user is None:
-        user = USERS.get(body.userId or body.playerId or "")
 
-    if user is None:
-        user = create_user(body.username or "")
-
-    selection = dict(body.selection)
-
-    for key in ("category", "Category"):
-        if key in body.model_extra:
-            selection[key] = body.model_extra[key]
-
-    for key in ("itemId", "ItemId"):
-        if key in body.model_extra:
-            selection[key] = body.model_extra[key]
-
-    user["inventory"].update(selection)
-
-    return {
-        "ok": True,
+@app.get("/api/lobby")
+@app.get("/api/0.56/lobby")
+def lobby():
+    return jsonify({
         "success": True,
-        "result": "success",
-        "userId": user["id"],
-        "playerId": user["id"],
-        "selected": True,
-        "selection": selection,
-        "inventory": user["inventory"],
-        "data": {
-            "inventory": user["inventory"],
-            "photon": photon_data(),
+        "version": VERSION,
+        "player": next(
+            iter(players.values()),
+            player_payload()
+        ),
+        "wallet": {
+            "gems": 6700,
+            "tokens": 2000
         },
-    }
+        "tournamentCard": tournament_template("1v1_bd")["card"],
+        "status": "ready"
+    })
 
 
-@app.get("/shared/{version}/{key}")
-@app.get("/api/shared/{version}/{key}")
-@app.get("/api/v1/shared/{version}/{key}")
-def shared_config(version: int, key: str):
-    return {
-        "ok": True,
-        "result": "success",
-        "version": version,
-        "key": key,
-        "data": {
-            "version": GAME_VERSION,
-            "maintenance": False,
-            "photon": photon_data(),
-            "matchmaking": {
-                "enabled": True,
-                "region": DEFAULT_REGION,
-            },
-        },
-    }
+@app.get("/onlinecheck")
+def onlinecheck():
+    return jsonify({
+        "online": True,
+        "status": "ready",
+        "version": VERSION
+    })
 
 
-@app.get("/regions")
-@app.get("/api/regions")
-@app.get("/api/v1/regions")
-def regions():
-    return {
-        "ok": True,
-        "result": "success",
-        "defaultRegion": DEFAULT_REGION,
-        "bestRegion": True,
-        "regions": [
-            {
-                "id": region,
-                "code": region,
-                "name": region,
-                "online": True,
-                "players": 0,
-            }
-            for region in PHOTON_REGIONS
-        ],
-        "photon": photon_data(),
-    }
+@app.get("/news/getall")
+def news():
+    return jsonify({
+        "news": []
+    })
 
 
-@app.get("/tournaments")
+@app.get("/game-events/me")
+def game_events_me():
+    return jsonify({
+        "events": []
+    })
+
+
+@app.get("/friends")
+def friends():
+    return jsonify({
+        "friends": []
+    })
+
+
+@app.get("/party")
+def party():
+    return jsonify({
+        "party": None,
+        "members": []
+    })
+
+
+@app.post("/party/invite")
+def party_invite():
+    data = request.get_json(silent=True) or {}
+
+    return jsonify({
+        "success": True,
+        "invited": data.get("playerId") or data.get("nickname")
+    })
+
+
+@app.post("/party/cancel")
+def party_cancel():
+    return jsonify({
+        "success": True,
+        "cancelled": True
+    })
+
+
+@app.get("/api/0.56/tournaments")
 @app.get("/api/tournaments")
-@app.get("/api/v1/tournaments")
+@app.get("/tournaments")
 def tournaments():
-    return {
-        "ok": True,
-        "result": "success",
-        "tournaments": [
-            {
-                "id": "lend_bd_1v1",
-                "name": TOURNAMENTS[0],
-                "mode": "1v1",
-                "enabled": True,
-            },
-            {
-                "id": "lend_ld_1v1",
-                "name": TOURNAMENTS[1],
-                "mode": "1v1",
-                "enabled": True,
-            },
-        ],
-    }
+    return jsonify({
+        "version": VERSION,
+        "tournaments": all_tournaments()
+    })
 
 
-@app.get("/matchmaking/filter")
-@app.get("/api/matchmaking/filter")
-@app.get("/api/v1/matchmaking/filter")
-def matchmaking_filter():
-    return {
-        "ok": True,
-        "result": "success",
-        "enabled": True,
-        "region": DEFAULT_REGION,
-        "poolId": "default",
-        "matchmakingPoolId": "default",
-        "filter": {},
-        "matchmakingFilter": {},
-        "photon": photon_data(),
-    }
+@app.get("/api/0.56/tournaments/<tournament_id>")
+def tournament_details(tournament_id):
+    if tournament_id not in {"1v1_bd", "1v1_laser"}:
+        return jsonify({
+            "success": False,
+            "message": "Torneio não encontrado"
+        }), 404
 
-
-@app.post("/matchmaking/join")
-@app.post("/api/matchmaking/join")
-@app.post("/api/v1/matchmaking/join")
-@app.post("/matchmaking")
-def matchmaking_join(
-    body: FlexibleBody,
-    authorization: Optional[str] = Header(default=None),
-    x_auth_token: Optional[str] = Header(default=None),
-    accessToken: Optional[str] = None,
-    token: Optional[str] = None,
-):
-    user = require_user(
-        authorization,
-        x_auth_token,
-        accessToken,
-        token,
+    return jsonify(
+        tournament_template(tournament_id)
     )
 
-    match_id = str(uuid.uuid4())
 
-    match = {
-        "id": match_id,
-        "matchId": match_id,
+@app.post("/api/0.56/tournaments/<tournament_id>/join")
+def tournament_join(tournament_id):
+    if tournament_id not in {"1v1_bd", "1v1_laser"}:
+        return jsonify({
+            "success": False,
+            "message": "Torneio não encontrado"
+        }), 404
+
+    player = find_player()
+    room = joined_players.setdefault(tournament_id, {})
+
+    if player["playerId"] not in room and len(room) >= 2:
+        return jsonify({
+            "success": False,
+            "message": "Torneio cheio"
+        }), 409
+
+    room[player["playerId"]] = {
+        "player": player,
         "status": "waiting",
-        "mode": body.model_extra.get("mode", "classic"),
-        "region": body.model_extra.get("region", DEFAULT_REGION),
-        "players": [
-            {
-                "id": user["id"],
-                "username": user["username"],
-            }
-        ],
-        "createdAt": now(),
+        "joinedAt": int(time.time())
     }
 
-    MATCHES[match_id] = match
+    tournament = tournament_template(tournament_id)
 
-    return {
-        "ok": True,
+    return jsonify({
         "success": True,
-        "result": "success",
-        "match": match,
-        "room": match,
-        "photon": photon_data(),
-    }
+        "tournamentId": tournament_id,
+        "player": player,
+        "status": "waiting",
+        "players": tournament["players"],
+        "message": (
+            f"À espera de jogadores... "
+            f"({tournament['players']['current']}/"
+            f"{tournament['players']['max']})"
+        )
+    })
 
 
-@app.get("/debug/requests")
-def debug_requests():
-    return {
-        "ok": True,
-        "requests": REQUEST_LOG,
-    }
+@app.get("/api/0.56/tournaments/<tournament_id>/status")
+def tournament_status(tournament_id):
+    if tournament_id not in {"1v1_bd", "1v1_laser"}:
+        return jsonify({
+            "success": False,
+            "message": "Torneio não encontrado"
+        }), 404
 
+    tournament = tournament_template(tournament_id)
 
-@app.get("/playername")
-@app.get("/api/playername")
-@app.get("/api/v1/playername")
-def playername():
-    number = secrets.randbelow(900000) + 100000
-    value = f".gg/sglend{number}"
-
-    return {
-        "ok": True,
-        "playerName": value,
-        "playername": value,
-        "serverNumber": str(number),
-    }
-
-
-@app.post("/logout")
-@app.post("/api/logout")
-def logout(
-    authorization: Optional[str] = Header(default=None),
-    x_auth_token: Optional[str] = Header(default=None),
-    accessToken: Optional[str] = None,
-    token: Optional[str] = None,
-):
-    current = token_from_request(
-        authorization,
-        x_auth_token,
-        accessToken,
-        token,
+    state = (
+        "in_match"
+        if tournament["players"]["current"] >= 2
+        else "waiting"
     )
 
-    if current:
-        TOKENS.pop(current, None)
+    if state == "in_match":
+        message = "A partida vai começar..."
+    else:
+        message = (
+            f"À espera de jogadores... "
+            f"({tournament['players']['current']}/"
+            f"{tournament['players']['max']})"
+        )
 
-    return {
-        "ok": True,
+    return jsonify({
         "success": True,
-    }
+        "tournamentId": tournament_id,
+        "status": state,
+        "players": tournament["players"],
+        "message": message
+    })
+
+
+@app.post("/api/0.56/tournaments/<tournament_id>/result")
+def tournament_result(tournament_id):
+    if tournament_id not in {"1v1_bd", "1v1_laser"}:
+        return jsonify({
+            "success": False,
+            "message": "Torneio não encontrado"
+        }), 404
+
+    data = request.get_json(silent=True) or {}
+
+    return jsonify({
+        "success": True,
+        "tournamentId": tournament_id,
+        "status": "finished",
+        "player": (
+            data.get("player")
+            or next(iter(players.values()), player_payload())
+        ),
+        "position": data.get("position", 1),
+        "message": "Resultado recebido"
+    })
+
+
+@app.post("/game-events/join")
+def game_events_join():
+    return jsonify({
+        "success": True,
+        "status": "joined"
+    })
+
+
+@app.get("/api/0.56")
+def api_056():
+    return jsonify({
+        "success": True,
+        "version": VERSION,
+        "service": "Stumble Shade"
+    })
+
+
+@app.get("/docs")
+def docs():
+    return jsonify({
+        "service": "Stumble Shade Backend",
+        "version": VERSION,
+        "readme": "Veja README.md"
+    })
+
+
+@app.get("/openapi.json")
+def openapi():
+    return jsonify({
+        "openapi": "3.0.0",
+        "info": {
+            "title": "Stumble Shade 0.56 API",
+            "version": VERSION
+        }
+    })
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "8080"))
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
+
 
 
 
