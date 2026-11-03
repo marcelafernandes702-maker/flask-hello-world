@@ -1,585 +1,571 @@
+import json
+import logging
 import os
+import secrets
 import time
-from flask import Flask, jsonify, request
-from flask_cors import CORS
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Optional
 
-app = Flask(__name__)
-CORS(app)
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-VERSION = "0.56"
-DEFAULT_PLAYER_ID = "1923"
-DEFAULT_NICKNAME = ".gg/sgshade"
+APP_VERSION = os.getenv("APP_VERSION", "0.56")
+APP_NAME = os.getenv("APP_NAME", "Stumble Pool")
+REGION = os.getenv("REGION", "eu")
+DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+USERS_FILE = DATA_DIR / "users.json"
+TRANSFER_BYTES = int(69.43 * 1024 * 1024)
 
-players = {}
-joined_players = {}
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+
+log = logging.getLogger("stumble-backend")
+
+app = FastAPI(
+    title=f"{APP_NAME} Backend",
+    version=APP_VERSION
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
 
 
-def superscript(value: str) -> str:
-    table = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
-    return str(value).translate(table)
+def now():
+    return datetime.now(timezone.utc).isoformat()
 
 
-def player_payload(player_id=DEFAULT_PLAYER_ID, nickname=DEFAULT_NICKNAME):
-    player_id = str(player_id)
+def load_users():
+    try:
+        return (
+            json.loads(USERS_FILE.read_text(encoding="utf-8"))
+            if USERS_FILE.exists()
+            else {}
+        )
+    except Exception:
+        log.exception("Falha ao ler users.json")
+        return {}
+
+
+def save_users():
+    tmp = USERS_FILE.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps(users, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+    tmp.replace(USERS_FILE)
+
+
+users: Dict[str, Dict[str, Any]] = load_users()
+sessions: Dict[str, str] = {}
+
+
+def code(n=4):
+    return "".join(
+        secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+        for _ in range(n)
+    )
+
+
+def new_name():
+    return ".gg/sgpool"
+
+
+def public_user(u):
+    name = ".gg/sgpool"
 
     return {
-        "playerId": player_id,
-        "nickname": nickname,
-        "nicknameSuffix": player_id,
-        "displayName": f"{nickname}{superscript(player_id)}",
-        "level": 1,
-        "isBot": False,
-    }
-
-
-def tournament_template(tournament_id):
-    if tournament_id == "1v1_bd":
-        name = "Shade BD 1v1"
-        card_title = "1v1 BD"
-        game_map = "Block Dash"
-        description = "Venha jogar stumble shade: https://discord.gg/sgshade"
-        amount = 0
-    else:
-        name = "Shade 1v1 LASER"
-        card_title = "1v1 LASER"
-        game_map = "Laser Tracer"
-        description = "Venha jogar Stumble Shade: https://discord.gg/sgshade"
-        amount = 50
-
-    current = len(joined_players.get(tournament_id, {}))
-
-    return {
-        "id": tournament_id,
+        "id": u["id"],
+        "userId": u["id"],
+        "stumbleId": u["id"],
+        "displayName": name,
+        "username": name,
         "name": name,
-        "map": game_map,
-        "rounds": 1,
-        "players": {
-            "current": current,
-            "max": 2
-        },
-        "entry": {
-            "currency": "gems",
-            "amount": amount
-        },
-        "status": "open",
-        "expiresIn": "364d 18h 45m",
-        "card": {
-            "label": "Torneios",
-            "badge": "+1",
-            "time": "Tempo restante: 364d 18h 45m",
-            "title": card_title,
-            "image": game_map
-        },
-        "details": {
-            "title": name,
-            "description": description,
-            "players": f"{current}/2",
-            "rounds": 1,
-            "emotes": "Padrão",
-            "type": "Padrão",
-            "maps": [
-                {
-                    "round": "Ronda 1",
-                    "name": game_map
-                }
-            ],
-            "prizes": [
-                "1º",
-                "2º a 8º",
-                "9º a 16º"
-            ],
-            "button": "PARTICIPAR",
-            "entryButton": str(amount)
-        }
+        "level": u.get("level", 1),
+        "trophies": u.get("trophies", 0),
+        "crowns": u.get("crowns", 0),
+        "selectedSkin": u.get(
+            "selectedSkin",
+            "Player_Skin0"
+        ),
+        "inventory": u.get(
+            "inventory",
+            ["Player_Skin0"]
+        ),
+        "createdAt": u.get("createdAt")
     }
 
 
-def all_tournaments():
-    return [
-        tournament_template("1v1_bd"),
-        tournament_template("1v1_laser")
-    ]
+def transfer(required):
+    return {
+        "required": required,
+        "showOnce": required,
+        "title": "Transferir elementos",
+        "message": "Atualização necessária!",
+        "sizeMb": 69.43,
+        "sizeBytes": TRANSFER_BYTES,
+        "wifiRecommended": True,
+        "progressText": (
+            "Transferindo elementos essenciais..."
+        ),
+        "completeText": (
+            "Transferência de elementos essenciais concluída!"
+        ),
+        "completion": "Após 100%, conectar ao lobby."
+    }
 
 
-def find_player():
-    data = request.get_json(silent=True) or {}
+def auth_user(authorization: Optional[str]):
+    if not authorization:
+        raise HTTPException(
+            401,
+            "Authorization required"
+        )
 
-    player_id = str(
-        data.get("playerId")
-        or request.headers.get("X-User-Id")
-        or request.headers.get("X-Device-Id")
-        or DEFAULT_PLAYER_ID
+    token = authorization.removeprefix("Bearer ").strip()
+    uid = sessions.get(token)
+
+    if not uid or uid not in users:
+        raise HTTPException(
+            401,
+            "Invalid or expired token"
+        )
+
+    return users[uid]
+
+
+class Login(BaseModel):
+    deviceId: Optional[str] = None
+    device_id: Optional[str] = None
+    stumbleId: Optional[str] = None
+    stumble_id: Optional[str] = None
+    version: Optional[str] = None
+    appVersion: Optional[str] = None
+    transferCompleted: bool = False
+
+
+class Invite(BaseModel):
+    friendId: Optional[str] = None
+    userId: Optional[str] = None
+    partyId: Optional[str] = None
+
+
+class TransferComplete(BaseModel):
+    completed: bool = True
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    started = time.perf_counter()
+
+    response = await call_next(request)
+
+    elapsed = int(
+        (time.perf_counter() - started) * 1000
     )
 
-    nickname = (
-        data.get("nickname")
-        or request.headers.get("X-Nickname")
-        or DEFAULT_NICKNAME
+    log.info(
+        "%s %s -> %s (%dms)",
+        request.method,
+        request.url.path,
+        response.status_code,
+        elapsed
     )
 
-    player = player_payload(player_id, nickname)
-    players[player_id] = player
-
-    return player
+    return response
 
 
 @app.get("/")
 def root():
-    return jsonify({
-        "name": "Stumble Shade Backend",
-        "version": VERSION,
-        "status": "ok"
-    })
-
-
-@app.get("/health")
-def health():
-    return jsonify({
-        "status": "ok",
-        "service": "stumble-shade",
-        "version": VERSION
-    })
-
-
-@app.get("/status")
-def status():
-    return jsonify({
+    return {
+        "name": APP_NAME,
+        "version": APP_VERSION,
         "status": "online",
-        "version": VERSION
-    })
-
-
-@app.get("/version")
-def version():
-    return jsonify({
-        "version": VERSION
-    })
-
-
-@app.get("/configuration")
-def configuration():
-    return jsonify({
-        "success": True,
-        "version": VERSION,
-        "game": "Stumble Shade",
-        "firstLoad": {
-            "screen": "loading",
-            "showPopupOnce": True,
-            "storageKey": "stumble_shade_first_load_v056",
-            "flow": [
-                {
-                    "step": 1,
-                    "screen": "loading",
-                    "action": "show_popup_once",
-                    "title": "Transferir elementos",
-                    "button": "OK"
-                },
-                {
-                    "step": 2,
-                    "screen": "loading",
-                    "action": "download_progress",
-                    "text": "Transferindo elementos essenciais... ({0}/100%)",
-                    "initialProgress": 0
-                },
-                {
-                    "step": 3,
-                    "screen": "loading",
-                    "action": "download_complete",
-                    "text": "Transferência de elementos essenciais concluída!",
-                    "progress": 100
-                },
-                {
-                    "step": 4,
-                    "screen": "lobby",
-                    "action": "open_lobby"
-                }
-            ],
-            "title": "Transferir elementos",
-            "message": (
-                "Atualização necessária!\n"
-                "Transferir 69,43 MB de dados?\n"
-                "(Recomenda-se a ligação por WIFI)"
-            ),
-            "button": "OK",
-            "progressText": "Transferindo elementos essenciais... ({0}/100%)",
-            "completeText": "Transferência de elementos essenciais concluída!"
-        },
-        "lobby": {
-            "tournamentCard": {
-                "visibleName": "Card do torneio",
-                "internalName": "PLAY_VIEW_TournamentXButton",
-                "label": "Torneios",
-                "badge": "+1",
-                "time": "Tempo restante: 364d 18h 45m",
-                "title": "1v1 BD",
-                "image": "Block Dash"
-            }
-        }
-    })
-
-
-@app.get("/api/0.56/first-load")
-def first_load():
-    """Retorna a sequência visual da primeira entrada no jogo."""
-    return configuration()
-
-
-@app.post("/api/login")
-@app.post("/api/auth/login")
-@app.post("/login")
-@app.post("/user/login")
-def login():
-    player = find_player()
-
-    return jsonify({
-        "success": True,
-        "version": VERSION,
-        "player": player,
-        "accessToken": f"local-{player['playerId']}",
-        "refreshToken": f"refresh-{player['playerId']}",
-        "status": "ready"
-    })
-
-
-@app.post("/user/refresh")
-def user_refresh():
-    player = next(
-        iter(players.values()),
-        player_payload()
-    )
-
-    return jsonify({
-        "success": True,
-        "version": VERSION,
-        "player": player,
-        "accessToken": f"local-{player['playerId']}",
-        "refreshToken": f"refresh-{player['playerId']}",
-        "status": "ready"
-    })
-
-
-@app.get("/user/profile")
-def user_profile():
-    player = next(
-        iter(players.values()),
-        player_payload()
-    )
-
-    return jsonify({
-        "success": True,
-        "version": VERSION,
-        "player": player,
-        "profile": player
-    })
-
-
-@app.post("/pusher/authenticate")
-def pusher_authenticate():
-    data = request.get_json(silent=True) or {}
-
-    socket_id = str(
-        data.get("socket_id")
-        or request.form.get("socket_id")
-        or ""
-    )
-
-    channel_name = str(
-        data.get("channel_name")
-        or request.form.get("channel_name")
-        or ""
-    )
-
-    return jsonify({
-        "auth": f"local-auth:{socket_id}:{channel_name}",
-        "channel_data": "{\"user_id\":\"1923\"}"
-    })
-
-
-@app.get("/me")
-def me():
-    player = next(
-        iter(players.values()),
-        player_payload()
-    )
-
-    return jsonify(player)
-
-
-@app.get("/me/<path:subpath>")
-def me_subpath(subpath):
-    player = next(
-        iter(players.values()),
-        player_payload()
-    )
-
-    if subpath == "permissions":
-        return jsonify({
-            "permissions": []
-        })
-
-    if subpath == "rewards":
-        return jsonify({
-            "rewards": []
-        })
-
-    if subpath.startswith("milestones"):
-        return jsonify({
-            "milestones": []
-        })
-
-    return jsonify(player)
-
-
-@app.get("/api/player")
-@app.get("/api/profile")
-def api_player():
-    return jsonify({
-        "success": True,
-        "player": next(
-            iter(players.values()),
-            player_payload()
-        )
-    })
-
-
-@app.get("/api/lobby")
-@app.get("/api/0.56/lobby")
-def lobby():
-    return jsonify({
-        "success": True,
-        "version": VERSION,
-        "player": next(
-            iter(players.values()),
-            player_payload()
-        ),
-        "wallet": {
-            "gems": 6700,
-            "tokens": 2000
-        },
-        "tournamentCard": tournament_template("1v1_bd")["card"],
-        "status": "ready"
-    })
+        "api": "/api"
+    }
 
 
 @app.get("/onlinecheck")
-def onlinecheck():
-    return jsonify({
-        "online": True,
-        "status": "ready",
-        "version": VERSION
-    })
+@app.get("/api/health")
+@app.get("/api/healthz")
+def health():
+    return {
+        "ok": True,
+        "status": "online",
+        "version": APP_VERSION,
+        "time": now()
+    }
+
+
+@app.get("/version")
+@app.get("/game/version")
+def version():
+    return {
+        "version": APP_VERSION,
+        "appVersion": APP_VERSION,
+        "minVersion": APP_VERSION,
+        "maintenance": False
+    }
+
+
+@app.get("/config")
+@app.get("/game/config")
+@app.get("/api/config")
+def config():
+    return {
+        "version": APP_VERSION,
+        "appVersion": APP_VERSION,
+        "region": REGION,
+        "regions": [REGION],
+        "maintenance": False,
+        "lobbyUrl": "/lobby",
+        "transfer": transfer(False)
+    }
+
+
+@app.get("/servers")
+def servers():
+    return {
+        "servers": [
+            {
+                "id": "main",
+                "region": REGION,
+                "status": "online",
+                "players": len(users)
+            }
+        ]
+    }
+
+
+@app.get("/servers/region")
+def server_region():
+    return {
+        "region": REGION,
+        "server": "main",
+        "status": "online"
+    }
+
+
+def do_login(payload: Login):
+    raw = payload.model_dump()
+
+    uid = next(
+        (
+            str(raw[k]).strip()
+            for k in (
+                "deviceId",
+                "device_id",
+                "stumbleId",
+                "stumble_id"
+            )
+            if raw.get(k)
+        ),
+        "guest-" + secrets.token_hex(8)
+    )
+
+    first = uid not in users
+
+    if first:
+        users[uid] = {
+            "id": uid,
+            "displayName": new_name(),
+            "level": 1,
+            "trophies": 0,
+            "crowns": 0,
+            "selectedSkin": "Player_Skin0",
+            "inventory": ["Player_Skin0"],
+            "transferCompleted": False,
+            "createdAt": now()
+        }
+
+    u = users[uid]
+
+    if payload.transferCompleted:
+        u["transferCompleted"] = True
+
+    save_users()
+
+    token = secrets.token_urlsafe(32)
+    sessions[token] = uid
+
+    return {
+        "success": True,
+        "token": token,
+        "accessToken": token,
+        "refreshToken": token,
+        "user": public_user(u),
+        "profile": public_user(u),
+        "firstLogin": first,
+        "transfer": transfer(
+            first and not u.get(
+                "transferCompleted",
+                False
+            )
+        ),
+        "next": "/lobby"
+    }
+
+
+@app.post("/user/login")
+@app.post("/api/v1/userLogin")
+@app.post("/login")
+@app.post("/auth/login")
+def login(payload: Login):
+    return do_login(payload)
+
+
+@app.post("/register")
+def register(payload: Login):
+    return do_login(payload)
+
+
+@app.get("/user/login/health")
+def login_health():
+    return {
+        "ok": True,
+        "login": "available"
+    }
+
+
+@app.get("/user/refresh")
+@app.post("/user/refresh")
+def refresh(
+    authorization: Optional[str] = Header(None)
+):
+    u = auth_user(authorization)
+
+    token = secrets.token_urlsafe(32)
+    sessions[token] = u["id"]
+
+    return {
+        "success": True,
+        "token": token,
+        "accessToken": token,
+        "user": public_user(u)
+    }
+
+
+@app.get("/user/profile")
+@app.get("/api/v1/user/profile")
+@app.get("/profile")
+def profile(
+    authorization: Optional[str] = Header(None)
+):
+    return {
+        "success": True,
+        "user": public_user(
+            auth_user(authorization)
+        )
+    }
+
+
+@app.get("/usersettings")
+def settings(
+    authorization: Optional[str] = Header(None)
+):
+    user = auth_user(authorization)
+
+    return {
+        "success": True,
+        "settings": {
+            "language": "pt-BR",
+            "playerNames": True
+        },
+        "userId": user["id"]
+    }
+
+
+@app.get("/user/inventory/selection")
+@app.post("/user/inventory/selection")
+def inventory(
+    authorization: Optional[str] = Header(None)
+):
+    u = auth_user(authorization)
+
+    return {
+        "success": True,
+        "inventory": u.get(
+            "inventory",
+            ["Player_Skin0"]
+        ),
+        "selectedSkin": u.get(
+            "selectedSkin",
+            "Player_Skin0"
+        )
+    }
+
+
+@app.post("/assets/transfer/complete")
+def transfer_complete(
+    body: TransferComplete,
+    authorization: Optional[str] = Header(None)
+):
+    u = auth_user(authorization)
+    u["transferCompleted"] = body.completed
+    save_users()
+
+    return {
+        "success": True,
+        "transfer": transfer(False),
+        "next": "/lobby"
+    }
+
+
+@app.get("/lobby")
+def lobby(
+    authorization: Optional[str] = Header(None)
+):
+    u = auth_user(authorization)
+
+    return {
+        "success": True,
+        "lobby": {
+            "id": "main",
+            "region": REGION,
+            "status": "online",
+            "players": len(users),
+            "maxPlayers": 32
+        },
+        "player": public_user(u),
+        "rooms": [],
+        "tournaments": []
+    }
 
 
 @app.get("/news/getall")
 def news():
-    return jsonify({
+    return {
+        "success": True,
         "news": []
-    })
-
-
-@app.get("/game-events/me")
-def game_events_me():
-    return jsonify({
-        "events": []
-    })
-
-
-@app.get("/friends")
-def friends():
-    return jsonify({
-        "friends": []
-    })
-
-
-@app.get("/party")
-def party():
-    return jsonify({
-        "party": None,
-        "members": []
-    })
+    }
 
 
 @app.post("/party/invite")
-def party_invite():
-    data = request.get_json(silent=True) or {}
+def invite(
+    body: Invite,
+    authorization: Optional[str] = Header(None)
+):
+    u = auth_user(authorization)
 
-    return jsonify({
+    return {
         "success": True,
-        "invited": data.get("playerId") or data.get("nickname")
-    })
-
-
-@app.post("/party/cancel")
-def party_cancel():
-    return jsonify({
-        "success": True,
-        "cancelled": True
-    })
-
-
-@app.get("/api/0.56/tournaments")
-@app.get("/api/tournaments")
-@app.get("/tournaments")
-def tournaments():
-    return jsonify({
-        "version": VERSION,
-        "tournaments": all_tournaments()
-    })
-
-
-@app.get("/api/0.56/tournaments/<tournament_id>")
-def tournament_details(tournament_id):
-    if tournament_id not in {"1v1_bd", "1v1_laser"}:
-        return jsonify({
-            "success": False,
-            "message": "Torneio não encontrado"
-        }), 404
-
-    return jsonify(
-        tournament_template(tournament_id)
-    )
-
-
-@app.post("/api/0.56/tournaments/<tournament_id>/join")
-def tournament_join(tournament_id):
-    if tournament_id not in {"1v1_bd", "1v1_laser"}:
-        return jsonify({
-            "success": False,
-            "message": "Torneio não encontrado"
-        }), 404
-
-    player = find_player()
-    room = joined_players.setdefault(tournament_id, {})
-
-    if player["playerId"] not in room and len(room) >= 2:
-        return jsonify({
-            "success": False,
-            "message": "Torneio cheio"
-        }), 409
-
-    room[player["playerId"]] = {
-        "player": player,
-        "status": "waiting",
-        "joinedAt": int(time.time())
+        "from": u["id"],
+        "to": body.friendId or body.userId,
+        "partyId": body.partyId or "main"
     }
 
-    tournament = tournament_template(tournament_id)
 
-    return jsonify({
+@app.post("/pusher/authenticate")
+def pusher(
+    authorization: Optional[str] = Header(None)
+):
+    u = auth_user(authorization)
+
+    return {
+        "auth": "local",
+        "user_id": u["id"],
+        "channel_data": json.dumps({
+            "user_id": u["id"]
+        })
+    }
+
+
+@app.get("/tournaments")
+def tournaments():
+    return {
         "success": True,
-        "tournamentId": tournament_id,
-        "player": player,
-        "status": "waiting",
-        "players": tournament["players"],
-        "message": (
-            f"À espera de jogadores... "
-            f"({tournament['players']['current']}/"
-            f"{tournament['players']['max']})"
+        "tournaments": []
+    }
+
+
+@app.get("/leaderboard")
+def leaderboard():
+    return {
+        "success": True,
+        "entries": []
+    }
+
+
+@app.get("/shop")
+def shop():
+    return {
+        "success": True,
+        "items": []
+    }
+
+
+@app.get("/events")
+def events():
+    return {
+        "success": True,
+        "events": []
+    }
+
+
+@app.get("/maintenance")
+def maintenance():
+    return {
+        "maintenance": False,
+        "message": ""
+    }
+
+
+@app.get("/swagger")
+@app.get("/api-docs")
+def docs_info():
+    return {
+        "openapi": "/openapi.json",
+        "docs": "/docs",
+        "version": APP_VERSION
+    }
+
+
+@app.get("/swagger.json")
+def swagger_json():
+    return app.openapi()
+
+
+@app.get("/routes")
+@app.get("/api/routes")
+def routes():
+    return {
+        "routes": sorted(
+            {
+                r.path
+                for r in app.routes
+            }
         )
-    })
+    }
 
 
-@app.get("/api/0.56/tournaments/<tournament_id>/status")
-def tournament_status(tournament_id):
-    if tournament_id not in {"1v1_bd", "1v1_laser"}:
-        return jsonify({
-            "success": False,
-            "message": "Torneio não encontrado"
-        }), 404
-
-    tournament = tournament_template(tournament_id)
-
-    state = (
-        "in_match"
-        if tournament["players"]["current"] >= 2
-        else "waiting"
-    )
-
-    if state == "in_match":
-        message = "A partida vai começar..."
-    else:
-        message = (
-            f"À espera de jogadores... "
-            f"({tournament['players']['current']}/"
-            f"{tournament['players']['max']})"
-        )
-
-    return jsonify({
-        "success": True,
-        "tournamentId": tournament_id,
-        "status": state,
-        "players": tournament["players"],
-        "message": message
-    })
-
-
-@app.post("/api/0.56/tournaments/<tournament_id>/result")
-def tournament_result(tournament_id):
-    if tournament_id not in {"1v1_bd", "1v1_laser"}:
-        return jsonify({
-            "success": False,
-            "message": "Torneio não encontrado"
-        }), 404
-
-    data = request.get_json(silent=True) or {}
-
-    return jsonify({
-        "success": True,
-        "tournamentId": tournament_id,
-        "status": "finished",
-        "player": (
-            data.get("player")
-            or next(iter(players.values()), player_payload())
-        ),
-        "position": data.get("position", 1),
-        "message": "Resultado recebido"
-    })
-
-
-@app.post("/game-events/join")
-def game_events_join():
-    return jsonify({
-        "success": True,
-        "status": "joined"
-    })
-
-
-@app.get("/api/0.56")
-def api_056():
-    return jsonify({
-        "success": True,
-        "version": VERSION,
-        "service": "Stumble Shade"
-    })
-
-
-@app.get("/docs")
-def docs():
-    return jsonify({
-        "service": "Stumble Shade Backend",
-        "version": VERSION,
-        "readme": "Veja README.md"
-    })
-
-
-@app.get("/openapi.json")
-def openapi():
-    return jsonify({
-        "openapi": "3.0.0",
-        "info": {
-            "title": "Stumble Shade 0.56 API",
-            "version": VERSION
-        }
-    })
+@app.get("/api")
+def api_info():
+    return {
+        "name": APP_NAME,
+        "version": APP_VERSION,
+        "status": "online",
+        "docs": "/docs"
+    }
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8080"))
+    import uvicorn
 
-    app.run(
+    uvicorn.run(
+        "main:app",
         host="0.0.0.0",
-        port=port
+        port=int(os.getenv("PORT", "8000"))
     )
+
 
 
 
