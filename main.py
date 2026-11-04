@@ -11,7 +11,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-APP_VERSION = os.getenv("APP_VERSION", "0.45.4")
+APP_VERSION = os.getenv("APP_VERSION", "0.50")
 APP_NAME = os.getenv("APP_NAME", "Stumble Pool")
 REGION = os.getenv("REGION", "eu")
 
@@ -609,6 +609,7 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=int(os.getenv("PORT", "8000")),
     )
+
 
 
 
