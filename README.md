@@ -1,20 +1,21 @@
-# Backend do Stumble Pool 0.45.4
+# Stumble Pool 0.50 Backend
 
-Backend de referência em FastAPI para testar a entrada da versão 0.45.4 no lobby. Ele implementa as rotas observadas no fluxo do cliente, incluindo login de convidado, `usersettings`, seleção de inventário, compartilhamento, perfil persistente, lobby, servidores, torneios e respostas compatíveis em JSON.
+Reference FastAPI backend for testing version 0.50 lobby entry. It implements the routes observed in the client flow, including guest login, `usersettings`, inventory selection, shared data, persistent profiles, lobby, servers, tournaments, and compatible JSON responses.
 
-## Arquivos
+## Files
 
-- `main.py` — aplicação FastAPI.
-- `requirements.txt` — dependências Python.
-- `data/users.json` — criado automaticamente na primeira execução para manter os perfis.
+- `main.py` — FastAPI application.
+- `requirements.txt` — Python dependencies.
+- `data/users.json` — created automatically on first run to persist player profiles.
 
-## Execução local
+## Local setup
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 8000
+
 
 
 
