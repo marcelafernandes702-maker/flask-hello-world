@@ -1,6 +1,6 @@
-# Backend do Stumble Pool 0.56
+# Backend do Stumble Pool 0.45.4
 
-Backend de referência em FastAPI para testar a entrada da versão 0.56 no lobby. Ele implementa as rotas informadas, login de convidado, perfil persistente, lobby, servidores, torneios, eventos e respostas compatíveis em JSON.
+Backend de referência em FastAPI para testar a entrada da versão 0.45.4 no lobby. Ele implementa as rotas observadas no fluxo do cliente, incluindo login de convidado, `usersettings`, seleção de inventário, compartilhamento, perfil persistente, lobby, servidores, torneios e respostas compatíveis em JSON.
 
 ## Arquivos
 
@@ -15,6 +15,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 8000
+
 
 
 
