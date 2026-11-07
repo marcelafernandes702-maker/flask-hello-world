@@ -1,20 +1,28 @@
-# Stumble Pool 0.50 Backend
+# SGTracer FastAPI — Tournament API
 
-Reference FastAPI backend for testing version 0.50 lobby entry. It implements the routes observed in the client flow, including guest login, `usersettings`, inventory selection, shared data, persistent profiles, lobby, servers, tournaments, and compatible JSON responses.
+API feita com FastAPI para jogadores e torneios do SGTracer.
 
-## Files
+Recursos:
 
-- `main.py` — FastAPI application.
-- `requirements.txt` — Python dependencies.
-- `data/users.json` — created automatically on first run to persist player profiles.
+- Cadastro de jogadores;
+- PlayerID entre 1000 e 9999;
+- Nome automático no formato `.gg/sgtracer<sup>1299`;
+- Login;
+- Criação de torneios;
+- Inscrição em torneios;
+- Resultados;
+- Ranking;
+- Banco de dados SQLite;
+- Documentação automática em `/docs`.
 
-## Local setup
+## Rodar localmente
 
 ```bash
-python3 -m venv .venv
+python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 8000
+uvicorn main:app --reload
+
 
 
 
