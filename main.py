@@ -1,21 +1,61 @@
+import json
+import logging
 import os
+import re
 import secrets
-import sqlite3
+import time
 from datetime import datetime, timezone
-from typing import Optional
+from pathlib import Path
+from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from werkzeug.security import check_password_hash, generate_password_hash
+from pydantic import BaseModel
 
-DB_PATH = os.environ.get("DB_PATH", "data.sqlite3")
-PLAYER_ID_MIN = 1000
-PLAYER_ID_MAX = 9999
+
+APP_VERSION = os.getenv("APP_VERSION", "0.50")
+APP_NAME = os.getenv("APP_NAME", "Stumble Tracer")
+REGION = os.getenv("REGION", "eu")
+
+PHOTON_APP_ID = os.getenv(
+    "PHOTON_APP_ID",
+    "795799b9-486c-4ef9-b5a9-7b80278e58af",
+)
+PHOTON_APP_VERSION = os.getenv("PHOTON_APP_VERSION", "0.3")
+PHOTON_REGION = os.getenv("PHOTON_REGION", REGION)
+PHOTON_USE_NAME_SERVER = (
+    os.getenv("PHOTON_USE_NAME_SERVER", "true").lower() == "true"
+)
+
+PLAYER_ID_LIST = os.getenv(
+    "PLAYER_ID_LIST",
+    "1793,4406,6742,2355,3385,1212,1020,7778,"
+    "4404,5505,3303,0102,6767,4455,1555,0405,0607",
+).split(",")
+
+PLAYER_ID_LIST = [
+    value.strip().zfill(4)
+    for value in PLAYER_ID_LIST
+    if value.strip()
+]
+
+DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+USERS_FILE = DATA_DIR / "users.json"
+TRANSFER_BYTES = int(69.43 * 1024 * 1024)
+
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+
+log = logging.getLogger("stumble-tracer-backend")
 
 app = FastAPI(
-    title="SGTracer Tournament API",
-    version="1.0.0",
+    title=f"{APP_NAME} Backend",
+    version=APP_VERSION,
 )
 
 app.add_middleware(
@@ -28,736 +68,647 @@ app.add_middleware(
 
 
 def now():
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
-def db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+def load_users():
+    try:
+        if USERS_FILE.exists():
+            return json.loads(USERS_FILE.read_text(encoding="utf-8"))
+        return {}
+    except Exception:
+        log.exception("Falha ao ler users.json")
+        return {}
 
 
-def init_db():
-    conn = db()
-
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS players (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            player_id INTEGER NOT NULL UNIQUE,
-            username TEXT NOT NULL UNIQUE,
-            email TEXT UNIQUE,
-            password_hash TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS sessions (
-            token TEXT PRIMARY KEY,
-            player_id INTEGER NOT NULL
-                REFERENCES players(player_id) ON DELETE CASCADE,
-            created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS tournaments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            description TEXT NOT NULL DEFAULT '',
-            status TEXT NOT NULL DEFAULT 'open',
-            starts_at TEXT,
-            ends_at TEXT,
-            max_players INTEGER NOT NULL DEFAULT 32,
-            created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS tournament_players (
-            tournament_id INTEGER NOT NULL
-                REFERENCES tournaments(id) ON DELETE CASCADE,
-            player_id INTEGER NOT NULL
-                REFERENCES players(player_id) ON DELETE CASCADE,
-            joined_at TEXT NOT NULL,
-            PRIMARY KEY (tournament_id, player_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS tournament_results (
-            tournament_id INTEGER NOT NULL
-                REFERENCES tournaments(id) ON DELETE CASCADE,
-            player_id INTEGER NOT NULL
-                REFERENCES players(player_id) ON DELETE CASCADE,
-            points INTEGER NOT NULL DEFAULT 0,
-            position INTEGER,
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY (tournament_id, player_id)
-        );
-        """
+def save_users():
+    temporary_file = USERS_FILE.with_suffix(".tmp")
+    temporary_file.write_text(
+        json.dumps(users, ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
-
-    conn.commit()
-    conn.close()
+    temporary_file.replace(USERS_FILE)
 
 
-@app.on_event("startup")
-def startup():
-    init_db()
+users: Dict[str, Dict[str, Any]] = load_users()
+sessions: Dict[str, str] = {}
 
 
-class RegisterIn(BaseModel):
-    email: Optional[str] = None
-    password: str = Field(min_length=4)
-
-
-class TournamentIn(BaseModel):
-    name: str = Field(min_length=1)
-    description: str = ""
-    status: str = "open"
-    startsAt: Optional[str] = None
-    endsAt: Optional[str] = None
-    maxPlayers: int = Field(default=32, ge=2, le=10000)
-
-
-class ResultIn(BaseModel):
-    points: int = 0
-    position: Optional[int] = None
-
-
-class TournamentPatch(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    status: Optional[str] = None
-    startsAt: Optional[str] = None
-    endsAt: Optional[str] = None
-    maxPlayers: Optional[int] = Field(
-        default=None,
-        ge=2,
-        le=10000,
+def code(n=4):
+    return "".join(
+        secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+        for _ in range(n)
     )
 
 
-def player_json(row):
-    return {
-        "playerID": row["player_id"],
-        "username": row["username"],
-        "email": row["email"],
-        "createdAt": row["created_at"],
-    }
+def new_name():
+    return ".gg/sgtracer"
 
 
-def next_player_id(conn):
+def allocate_player_number():
     used = {
-        row[0]
-        for row in conn.execute(
-            "SELECT player_id FROM players"
-        ).fetchall()
+        str(user.get("playerNumber", "")).zfill(4)
+        for user in users.values()
+        if user.get("playerNumber")
     }
 
-    total = PLAYER_ID_MAX - PLAYER_ID_MIN + 1
+    for number in PLAYER_ID_LIST:
+        if number not in used:
+            return number
 
-    if len(used) >= total:
+    while True:
+        number = f"{secrets.randbelow(10000):04d}"
+        if number not in used:
+            return number
+
+
+def player_name(user):
+    number = str(user.get("playerNumber", "0000")).zfill(4)
+    return f".gg/sgtracer{number}"
+
+
+def clean_nickname(value: Optional[str]) -> str:
+    """
+    Remove tags from a nickname supplied by the client.
+    The result is limited to 24 characters.
+    """
+    cleaned = re.sub(r"<[^>]*>", "", value or "").strip()
+    return cleaned[:24]
+
+
+def public_user(user):
+    custom_name = clean_nickname(user.get("customNickname"))
+    name = custom_name or player_name(user)
+    number = str(user.get("playerNumber", "0000")).zfill(4)
+
+    return {
+        "id": number,
+        "userId": number,
+        "playerId": number,
+        "stumbleId": number,
+        "backendId": user["id"],
+        "displayName": name,
+        "username": name,
+        "name": name,
+        "level": user.get("level", 1),
+        "trophies": user.get("trophies", 0),
+        "crowns": user.get("crowns", 0),
+        "selectedSkin": user.get(
+            "selectedSkin",
+            "Player_Skin0",
+        ),
+        "inventory": user.get(
+            "inventory",
+            ["Player_Skin0"],
+        ),
+        "createdAt": user.get("createdAt"),
+    }
+
+
+def transfer(required):
+    return {
+        "required": required,
+        "showOnce": required,
+        "title": "Transferir elementos",
+        "message": "Atualização necessária!",
+        "sizeMb": 69.43,
+        "sizeBytes": TRANSFER_BYTES,
+        "wifiRecommended": True,
+        "progressText": "Transferindo elementos essenciais...",
+        "completeText": (
+            "Transferência de elementos essenciais concluída!"
+        ),
+        "completion": "Após 100%, conectar ao lobby.",
+    }
+
+
+def auth_user(authorization: Optional[str]):
+    if not authorization:
         raise HTTPException(
-            status_code=503,
-            detail="Todos os playerIDs de 1000 a 9999 estão ocupados",
+            status_code=401,
+            detail="Authorization required",
         )
 
-    candidate = (
-        secrets.randbelow(total)
-        + PLAYER_ID_MIN
+    token = authorization.removeprefix("Bearer ").strip()
+    user_id = sessions.get(token)
+
+    if not user_id or user_id not in users:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired token",
+        )
+
+    return users[user_id]
+
+
+class Login(BaseModel):
+    deviceId: Optional[str] = None
+    device_id: Optional[str] = None
+    stumbleId: Optional[str] = None
+    stumble_id: Optional[str] = None
+    version: Optional[str] = None
+    appVersion: Optional[str] = None
+    transferCompleted: bool = False
+
+
+class Invite(BaseModel):
+    friendId: Optional[str] = None
+    userId: Optional[str] = None
+    partyId: Optional[str] = None
+
+
+class TransferComplete(BaseModel):
+    completed: bool = True
+
+
+class SharedPayload(BaseModel):
+    playerId: Optional[str] = None
+    userId: Optional[str] = None
+    stumbleId: Optional[str] = None
+    data: Optional[Dict[str, Any]] = None
+
+
+class SetNick(BaseModel):
+    username: Optional[str] = None
+    nick: Optional[str] = None
+    nickname: Optional[str] = None
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    started = time.perf_counter()
+    response = await call_next(request)
+
+    duration = int((time.perf_counter() - started) * 1000)
+
+    log.info(
+        "%s %s -> %s (%dms)",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration,
     )
 
-    while candidate in used:
-        if candidate == PLAYER_ID_MAX:
-            candidate = PLAYER_ID_MIN
-        else:
-            candidate += 1
-
-    return candidate
-
-
-def auth_player(authorization: Optional[str]):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=401,
-            detail="Use Authorization: Bearer <token>",
-        )
-
-    token = authorization[7:].strip()
-
-    conn = db()
-
-    row = conn.execute(
-        """
-        SELECT p.*
-        FROM players p
-        JOIN sessions s ON s.player_id = p.player_id
-        WHERE s.token = ?
-        """,
-        (token,),
-    ).fetchone()
-
-    conn.close()
-
-    if row is None:
-        raise HTTPException(
-            status_code=401,
-            detail="Token inválido",
-        )
-
-    return row
+    return response
 
 
 @app.get("/")
 def root():
     return {
-        "service": "SGTracer Tournament API",
+        "name": APP_NAME,
+        "version": APP_VERSION,
         "status": "online",
-        "docs": "/docs",
+        "api": "/api",
     }
 
 
-@app.get("/health")
+@app.get("/onlinecheck")
+@app.get("/api/health")
+@app.get("/api/healthz")
 def health():
     return {
         "ok": True,
+        "status": "online",
+        "version": APP_VERSION,
         "time": now(),
     }
 
 
-@app.post("/auth/register", status_code=201)
-def register(payload: RegisterIn):
-    conn = db()
-
-    email = (
-        payload.email.strip().lower()
-        if payload.email
-        else None
-    )
-
-    try:
-        player_id = next_player_id(conn)
-
-        username = (
-            f".gg/sgtracer<sup>{player_id}"
-        )
-
-        conn.execute(
-            """
-            INSERT INTO players(
-                player_id,
-                username,
-                email,
-                password_hash,
-                created_at
-            )
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                player_id,
-                username,
-                email,
-                generate_password_hash(payload.password),
-                now(),
-            ),
-        )
-
-        conn.commit()
-
-        row = conn.execute(
-            "SELECT * FROM players WHERE player_id = ?",
-            (player_id,),
-        ).fetchone()
-
-        return {
-            "player": player_json(row),
-            "message": "Jogador criado",
-        }
-
-    except sqlite3.IntegrityError:
-        raise HTTPException(
-            status_code=409,
-            detail="Esse email já está cadastrado",
-        )
-
-    finally:
-        conn.close()
-
-
-@app.post("/auth/login")
-def login(payload: RegisterIn):
-    conn = db()
-
-    email = (
-        payload.email.strip().lower()
-        if payload.email
-        else ""
-    )
-
-    row = conn.execute(
-        "SELECT * FROM players WHERE email = ?",
-        (email,),
-    ).fetchone()
-
-    if row is None or not check_password_hash(
-        row["password_hash"],
-        payload.password,
-    ):
-        conn.close()
-
-        raise HTTPException(
-            status_code=401,
-            detail="Email ou senha inválidos",
-        )
-
-    token = secrets.token_urlsafe(32)
-
-    conn.execute(
-        """
-        INSERT INTO sessions(
-            token,
-            player_id,
-            created_at
-        )
-        VALUES (?, ?, ?)
-        """,
-        (
-            token,
-            row["player_id"],
-            now(),
-        ),
-    )
-
-    conn.commit()
-    conn.close()
-
+@app.get("/version")
+@app.get("/game/version")
+def version():
     return {
-        "token": token,
-        "player": player_json(row),
+        "version": APP_VERSION,
+        "appVersion": APP_VERSION,
+        "minVersion": APP_VERSION,
+        "maintenance": False,
     }
 
 
-@app.get("/players/me")
-def me(
-    authorization: Optional[str] = Header(None),
-):
-    player = auth_player(authorization)
+@app.get("/config")
+@app.get("/game/config")
+@app.get("/api/config")
+def config():
+    return {
+        "version": APP_VERSION,
+        "appVersion": APP_VERSION,
+        "region": REGION,
+        "regions": [REGION],
+        "maintenance": False,
+        "lobbyUrl": "/lobby",
+        "transfer": transfer(False),
+        "photon": {
+            "provider": "photon-realtime",
+            "appId": PHOTON_APP_ID,
+            "appVersion": PHOTON_APP_VERSION,
+            "region": PHOTON_REGION,
+            "useNameServer": PHOTON_USE_NAME_SERVER,
+            "fixedRegion": PHOTON_REGION,
+            "customAuthentication": False,
+            "anonymousClients": True,
+        },
+    }
+
+
+@app.get("/servers")
+def servers():
+    return {
+        "servers": [
+            {
+                "id": "main",
+                "region": REGION,
+                "status": "online",
+                "players": len(users),
+            }
+        ]
+    }
+
+
+@app.get("/servers/region")
+def server_region():
+    return {
+        "region": REGION,
+        "server": "main",
+        "status": "online",
+    }
+
+
+def do_login(payload: Login):
+    raw = payload.model_dump()
+
+    user_id = next(
+        (
+            str(raw[key]).strip()
+            for key in (
+                "deviceId",
+                "device_id",
+                "stumbleId",
+                "stumble_id",
+            )
+            if raw.get(key)
+        ),
+        "guest-" + secrets.token_hex(8),
+    )
+
+    first_login = user_id not in users
+
+    if first_login:
+        users[user_id] = {
+            "id": user_id,
+            "playerNumber": allocate_player_number(),
+            "displayName": None,
+            "level": 1,
+            "trophies": 0,
+            "crowns": 0,
+            "selectedSkin": "Player_Skin0",
+            "inventory": ["Player_Skin0"],
+            "transferCompleted": False,
+            "createdAt": now(),
+        }
+
+    user = users[user_id]
+
+    if not user.get("playerNumber"):
+        user["playerNumber"] = allocate_player_number()
+
+    user["displayName"] = player_name(user)
+
+    if payload.transferCompleted:
+        user["transferCompleted"] = True
+
+    save_users()
+
+    token = secrets.token_urlsafe(32)
+    sessions[token] = user_id
+
+    player = public_user(user)
 
     return {
-        "player": player_json(player),
+        "success": True,
+        "ok": True,
+        "token": token,
+        "accessToken": token,
+        "refreshToken": token,
+        "userId": user["playerNumber"],
+        "playerId": user["playerNumber"],
+        "stumbleId": user["playerNumber"],
+        "deviceId": user_id,
+        "user": player,
+        "profile": player,
+        "player": player,
+        "firstLogin": first_login,
+        "transfer": transfer(
+            first_login
+            and not user.get("transferCompleted", False)
+        ),
+        "next": "/lobby",
+    }
+
+
+@app.post("/user/login")
+@app.post("/api/v1/userLogin")
+@app.post("/api/v1/user/login")
+@app.post("/login")
+@app.post("/auth/login")
+def login(payload: Login):
+    return do_login(payload)
+
+
+@app.post("/api/v1/user/setname")
+@app.post("/user/setname")
+@app.post("/api/v1/user/setnick")
+@app.post("/user/setnick")
+def set_nick(
+    body: SetNick,
+    authorization: Optional[str] = Header(None),
+):
+    user = auth_user(authorization)
+
+    requested_name = (
+        body.nick
+        or body.nickname
+        or body.username
+        or ""
+    )
+
+    clean_name = clean_nickname(requested_name)
+
+    if clean_name:
+        user["customNickname"] = clean_name
+    else:
+        user.pop("customNickname", None)
+
+    save_users()
+
+    player = public_user(user)
+
+    return {
+        "success": True,
+        "ok": True,
+        "status": "success",
+        "nick": player["displayName"],
+        "username": player["username"],
+        "user": player,
+    }
+
+
+@app.post("/register")
+def register(payload: Login):
+    return do_login(payload)
+
+
+@app.get("/user/login/health")
+def login_health():
+    return {
+        "ok": True,
+        "login": "available",
+    }
+
+
+@app.get("/user/refresh")
+@app.post("/user/refresh")
+def refresh(authorization: Optional[str] = Header(None)):
+    user = auth_user(authorization)
+
+    token = secrets.token_urlsafe(32)
+    sessions[token] = user["id"]
+
+    return {
+        "success": True,
+        "token": token,
+        "accessToken": token,
+        "user": public_user(user),
+    }
+
+
+@app.get("/user/profile")
+@app.get("/api/v1/user/profile")
+@app.get("/profile")
+def profile(authorization: Optional[str] = Header(None)):
+    return {
+        "success": True,
+        "user": public_user(auth_user(authorization)),
+    }
+
+
+@app.get("/usersettings")
+def settings(authorization: Optional[str] = Header(None)):
+    user = auth_user(authorization)
+
+    return {
+        "success": True,
+        "ok": True,
+        "userId": user["playerNumber"],
+        "settings": {
+            "language": "pt-BR",
+            "playerNames": True,
+            "region": REGION,
+        },
+    }
+
+
+@app.get("/user/inventory/selection")
+@app.post("/user/inventory/selection")
+def inventory(authorization: Optional[str] = Header(None)):
+    user = auth_user(authorization)
+
+    items = user.get(
+        "inventory",
+        ["Player_Skin0"],
+    )
+
+    selected = user.get(
+        "selectedSkin",
+        "Player_Skin0",
+    )
+
+    return {
+        "success": True,
+        "ok": True,
+        "userId": user["playerNumber"],
+        "inventory": items,
+        "items": items,
+        "selection": {"skin": selected},
+        "selectedSkin": selected,
+    }
+
+
+@app.get("/shared/{shared_id}/{target_id}")
+def shared(shared_id: str, target_id: str):
+    safe_target = (
+        target_id
+        if target_id and target_id.upper() != "NULL"
+        else "public"
+    )
+
+    return {
+        "success": True,
+        "ok": True,
+        "shared": {
+            "id": shared_id,
+            "target": safe_target,
+            "items": [],
+            "players": [],
+            "data": {},
+        },
+    }
+
+
+@app.post("/assets/transfer/complete")
+def transfer_complete(
+    body: TransferComplete,
+    authorization: Optional[str] = Header(None),
+):
+    user = auth_user(authorization)
+    user["transferCompleted"] = body.completed
+    save_users()
+
+    return {
+        "success": True,
+        "transfer": transfer(False),
+        "next": "/lobby",
+    }
+
+
+@app.get("/lobby")
+def lobby(authorization: Optional[str] = Header(None)):
+    user = auth_user(authorization)
+
+    return {
+        "success": True,
+        "lobby": {
+            "id": "main",
+            "region": REGION,
+            "status": "online",
+            "players": len(users),
+            "maxPlayers": 32,
+        },
+        "player": public_user(user),
+        "rooms": [],
+        "tournaments": [],
+    }
+
+
+@app.get("/news/getall")
+def news():
+    return {
+        "success": True,
+        "news": [],
+    }
+
+
+@app.post("/party/invite")
+def invite(
+    body: Invite,
+    authorization: Optional[str] = Header(None),
+):
+    user = auth_user(authorization)
+
+    return {
+        "success": True,
+        "from": user["playerNumber"],
+        "to": body.friendId or body.userId,
+        "partyId": body.partyId or "main",
+    }
+
+
+@app.post("/pusher/authenticate")
+def pusher(authorization: Optional[str] = Header(None)):
+    user = auth_user(authorization)
+
+    return {
+        "auth": "local",
+        "user_id": user["playerNumber"],
+        "channel_data": json.dumps(
+            {"user_id": user["playerNumber"]}
+        ),
     }
 
 
 @app.get("/tournaments")
-def list_tournaments(
-    status: Optional[str] = None,
-):
-    conn = db()
-
-    if status:
-        rows = conn.execute(
-            """
-            SELECT *
-            FROM tournaments
-            WHERE status = ?
-            ORDER BY id DESC
-            """,
-            (status,),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            """
-            SELECT *
-            FROM tournaments
-            ORDER BY id DESC
-            """
-        ).fetchall()
-
-    tournaments = []
-
-    for row in rows:
-        item = dict(row)
-
-        item["players"] = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM tournament_players
-            WHERE tournament_id = ?
-            """,
-            (row["id"],),
-        ).fetchone()[0]
-
-        tournaments.append(item)
-
-    conn.close()
-
+def tournaments():
     return {
-        "tournaments": tournaments,
+        "success": True,
+        "tournaments": [],
     }
 
 
-@app.post("/tournaments", status_code=201)
-def create_tournament(
-    payload: TournamentIn,
-    authorization: Optional[str] = Header(None),
-):
-    auth_player(authorization)
-
-    conn = db()
-
-    cursor = conn.execute(
-        """
-        INSERT INTO tournaments(
-            name,
-            description,
-            status,
-            starts_at,
-            ends_at,
-            max_players,
-            created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            payload.name,
-            payload.description,
-            payload.status,
-            payload.startsAt,
-            payload.endsAt,
-            payload.maxPlayers,
-            now(),
-        ),
-    )
-
-    conn.commit()
-
-    row = conn.execute(
-        "SELECT * FROM tournaments WHERE id = ?",
-        (cursor.lastrowid,),
-    ).fetchone()
-
-    conn.close()
-
+@app.get("/leaderboard")
+def leaderboard():
     return {
-        "tournament": dict(row),
+        "success": True,
+        "entries": [],
     }
 
 
-@app.get("/tournaments/{tournament_id}")
-def get_tournament(tournament_id: int):
-    conn = db()
-
-    tournament = conn.execute(
-        """
-        SELECT *
-        FROM tournaments
-        WHERE id = ?
-        """,
-        (tournament_id,),
-    ).fetchone()
-
-    if tournament is None:
-        conn.close()
-
-        raise HTTPException(
-            status_code=404,
-            detail="Torneio não encontrado",
-        )
-
-    players = conn.execute(
-        """
-        SELECT
-            p.player_id AS playerID,
-            p.username,
-            tp.joined_at AS joinedAt
-        FROM tournament_players tp
-        JOIN players p
-            ON p.player_id = tp.player_id
-        WHERE tp.tournament_id = ?
-        ORDER BY tp.joined_at
-        """,
-        (tournament_id,),
-    ).fetchall()
-
-    conn.close()
-
+@app.get("/shop")
+def shop():
     return {
-        "tournament": dict(tournament),
-        "players": [dict(player) for player in players],
+        "success": True,
+        "items": [],
     }
 
 
-@app.post("/tournaments/{tournament_id}/join")
-def join_tournament(
-    tournament_id: int,
-    authorization: Optional[str] = Header(None),
-):
-    player = auth_player(authorization)
-
-    conn = db()
-
-    tournament = conn.execute(
-        """
-        SELECT *
-        FROM tournaments
-        WHERE id = ?
-        """,
-        (tournament_id,),
-    ).fetchone()
-
-    if tournament is None:
-        conn.close()
-
-        raise HTTPException(
-            status_code=404,
-            detail="Torneio não encontrado",
-        )
-
-    if tournament["status"] != "open":
-        conn.close()
-
-        raise HTTPException(
-            status_code=400,
-            detail="Esse torneio não está aberto",
-        )
-
-    count = conn.execute(
-        """
-        SELECT COUNT(*)
-        FROM tournament_players
-        WHERE tournament_id = ?
-        """,
-        (tournament_id,),
-    ).fetchone()[0]
-
-    if count >= tournament["max_players"]:
-        conn.close()
-
-        raise HTTPException(
-            status_code=400,
-            detail="O torneio está lotado",
-        )
-
-    try:
-        conn.execute(
-            """
-            INSERT INTO tournament_players(
-                tournament_id,
-                player_id,
-                joined_at
-            )
-            VALUES (?, ?, ?)
-            """,
-            (
-                tournament_id,
-                player["player_id"],
-                now(),
-            ),
-        )
-
-        conn.commit()
-
-    except sqlite3.IntegrityError:
-        conn.close()
-
-        raise HTTPException(
-            status_code=409,
-            detail="O jogador já está inscrito",
-        )
-
-    conn.close()
-
+@app.get("/events")
+def events():
     return {
-        "message": "Inscrição realizada",
-        "tournamentID": tournament_id,
-        "playerID": player["player_id"],
+        "success": True,
+        "events": [],
     }
 
 
-@app.post("/tournaments/{tournament_id}/results")
-def submit_result(
-    tournament_id: int,
-    payload: ResultIn,
-    authorization: Optional[str] = Header(None),
-):
-    player = auth_player(authorization)
-
-    conn = db()
-
-    tournament = conn.execute(
-        """
-        SELECT id
-        FROM tournaments
-        WHERE id = ?
-        """,
-        (tournament_id,),
-    ).fetchone()
-
-    if tournament is None:
-        conn.close()
-
-        raise HTTPException(
-            status_code=404,
-            detail="Torneio não encontrado",
-        )
-
-    joined = conn.execute(
-        """
-        SELECT 1
-        FROM tournament_players
-        WHERE tournament_id = ?
-        AND player_id = ?
-        """,
-        (
-            tournament_id,
-            player["player_id"],
-        ),
-    ).fetchone()
-
-    if joined is None:
-        conn.close()
-
-        raise HTTPException(
-            status_code=400,
-            detail="O jogador precisa estar inscrito no torneio",
-        )
-
-    conn.execute(
-        """
-        INSERT INTO tournament_results(
-            tournament_id,
-            player_id,
-            points,
-            position,
-            updated_at
-        )
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(tournament_id, player_id)
-        DO UPDATE SET
-            points = excluded.points,
-            position = excluded.position,
-            updated_at = excluded.updated_at
-        """,
-        (
-            tournament_id,
-            player["player_id"],
-            payload.points,
-            payload.position,
-            now(),
-        ),
-    )
-
-    conn.commit()
-    conn.close()
-
+@app.get("/maintenance")
+def maintenance():
     return {
-        "message": "Resultado salvo",
+        "maintenance": False,
+        "message": "",
     }
 
 
-@app.get("/tournaments/{tournament_id}/ranking")
-def ranking(tournament_id: int):
-    conn = db()
-
-    rows = conn.execute(
-        """
-        SELECT
-            r.player_id AS playerID,
-            p.username,
-            r.points,
-            r.position,
-            r.updated_at AS updatedAt
-        FROM tournament_results r
-        JOIN players p
-            ON p.player_id = r.player_id
-        WHERE r.tournament_id = ?
-        ORDER BY
-            r.points DESC,
-            r.position ASC,
-            r.updated_at ASC
-        """,
-        (tournament_id,),
-    ).fetchall()
-
-    conn.close()
-
+@app.get("/swagger")
+@app.get("/api-docs")
+def docs_info():
     return {
-        "tournamentID": tournament_id,
-        "ranking": [dict(row) for row in rows],
+        "openapi": "/openapi.json",
+        "docs": "/docs",
+        "version": APP_VERSION,
     }
 
 
-@app.patch("/tournaments/{tournament_id}")
-def update_tournament(
-    tournament_id: int,
-    payload: TournamentPatch,
-    authorization: Optional[str] = Header(None),
-):
-    auth_player(authorization)
+@app.get("/swagger.json")
+def swagger_json():
+    return app.openapi()
 
-    values = payload.dict(exclude_none=True)
 
-    values = {
-        "starts_at" if key == "startsAt"
-        else "ends_at" if key == "endsAt"
-        else "max_players" if key == "maxPlayers"
-        else key: value
-        for key, value in values.items()
+@app.get("/routes")
+@app.get("/api/routes")
+def routes():
+    return {
+        "routes": sorted(
+            {route.path for route in app.routes}
+        )
     }
 
-    if not values:
-        raise HTTPException(
-            status_code=400,
-            detail="Nenhum campo válido para atualizar",
-        )
 
-    conn = db()
-
-    exists = conn.execute(
-        """
-        SELECT 1
-        FROM tournaments
-        WHERE id = ?
-        """,
-        (tournament_id,),
-    ).fetchone()
-
-    if exists is None:
-        conn.close()
-
-        raise HTTPException(
-            status_code=404,
-            detail="Torneio não encontrado",
-        )
-
-    assignments = ", ".join(
-        f"{key} = ?"
-        for key in values
-    )
-
-    conn.execute(
-        f"""
-        UPDATE tournaments
-        SET {assignments}
-        WHERE id = ?
-        """,
-        list(values.values()) + [tournament_id],
-    )
-
-    conn.commit()
-    conn.close()
-
+@app.get("/api")
+def api_info():
     return {
-        "message": "Torneio atualizado",
+        "name": APP_NAME,
+        "version": APP_VERSION,
+        "status": "online",
+        "docs": "/docs",
     }
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    init_db()
-
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=int(os.environ.get("PORT", "5000")),
+        port=int(os.getenv("PORT", "8000")),
     )
+
 
 
 
