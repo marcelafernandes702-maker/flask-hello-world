@@ -46,7 +46,7 @@ app.use(express.json());
 // =====================
 // CONFIGURAÇÃO
 // =====================
-const TITLE = "Stumble Lend " + (process.env.VERSION || "dev");
+const TITLE = "Stumble Spark " + (process.env.VERSION || "dev");
 const PORT = process.env.PORT || 3000;
 
 // =====================
