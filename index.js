@@ -1,8 +1,3 @@
-// ============================================================================
-// STUMBLE TRACER 0.56 — JAVASCRIPT UNIFICADO
-// ============================================================================
-// Reúne os códigos JavaScript originais em um único arquivo.
-// O arquivo shared.json permanece externo e é carregado abaixo.
 
 require("dotenv").config();
 const express = require("express");
@@ -369,7 +364,7 @@ const BackendUtils = {
 class Database {
   constructor() {
     this.mongoUri = process.env.mongoUri;
-    this.dbName = "StumbleCash64";
+    this.dbName = "StumbleSpark64";
     this.client = null;
     this.db = null;
     this.collections = {
