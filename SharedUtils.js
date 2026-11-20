@@ -1,28 +1,17 @@
-{
-  "name": "backend-sgspark",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/espanha9ofc/Backend.git"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "bugs": {
-    "url": "https://github.com/espanha9ofc/Backend/issues"
-  },
-  "homepage": "https://github.com/espanha9ofc/Backend#readme",
-  "dependencies": {
-    "dotenv": "^17.4.2",
-    "express": "^5.2.1",
-    "jsonwebtoken": "^9.0.3",
-    "mongodb": "^7.2.0",
-    "path": "^0.12.7",
-    "uuid": "^14.0.0"
+const cryptoUtils = require("./CryptoUtils.js");
+const shared = require("./shared.json");
+const dotenv = require("dotenv");
+dotenv.config();
+
+function generateAuthPayload() {
+  const salt = process.env.LeagueSalt;
+  if (!salt) {
+    throw new Error("LeagueSalt não definida no .env");
   }
+
+  return shared;
 }
+
+module.exports = {
+  generateAuthPayload
+};
