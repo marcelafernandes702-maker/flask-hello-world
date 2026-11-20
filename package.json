@@ -8,15 +8,15 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/espanha9ofc/Backend.git"
+    "url": "git+https://github.com/pedrocamposfernandes8-eng/flask-hello-world.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "bugs": {
-    "url": "https://github.com/espanha9ofc/Backend/issues"
+    "url": "https://github.com/pedrocamposfernandes8-eng/flask-hello-worldissues"
   },
-  "homepage": "https://github.com/espanha9ofc/Backend#readme",
+  "homepage": "https://github.com/pedrocamposfernandes8-eng/flask-hello-world#readme",
   "dependencies": {
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
