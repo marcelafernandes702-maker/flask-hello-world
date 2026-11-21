@@ -1,11 +1,11 @@
 {
   "name": "backend-sglend",
   "version": "1.0.0",
-  "description": "Backend sgLend",
-  "main": "",
+  "description": "Backend SGLend",
+  "main": "index.js",
   "scripts": {
-    "start": "",
-    "test": "echo \"Error: no test specified\" && exit 1
+    "start": "node index.js",
+    "test": "echo \"No tests configured\""
   },
   "repository": {
     "type": "git",
