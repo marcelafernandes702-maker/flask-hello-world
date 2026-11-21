@@ -2,9 +2,9 @@
   "name": "backend-sglend",
   "version": "1.0.0",
   "description": "Backend sgLend",
-  "main": "index.js",
+  "main": "",
   "scripts": {
-    "start": "node index.js",
+    "start": "",
     "test": "echo \"Error: no test specified\" && exit 1
   },
   "repository": {
